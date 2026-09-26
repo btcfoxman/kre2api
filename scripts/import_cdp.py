@@ -113,7 +113,8 @@ def main() -> int:
             service + "/api/accounts/sync/browser",
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             headers={"Authorization": "Bearer " + token,
-                     "Content-Type": "application/json"},
+                     "Content-Type": "application/json",
+                     "User-Agent": user_agent},
             method="POST",
         )
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
