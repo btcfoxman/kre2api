@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111820">
+  <title>KRE2API · Krea 视频控制台</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="rail">
+      <div class="brand"><span class="brand-mark">K<span>↗</span></span><div><strong>KRE2API</strong><small>VIDEO OPERATIONS</small></div></div>
+      <nav aria-label="主导航">
+        <a href="#overview" class="active"><span>01</span> 总览</a>
+        <a href="#accounts"><span>02</span> 账号池</a>
+        <a href="#tasks"><span>03</span> 任务流水</a>
+      </nav>
+      <div class="rail-bottom"><div class="pulse"></div><span>UPSTREAM / KREA</span><button id="logoutBtn" type="button">退出</button></div>
+    </aside>
+
+    <main>
+      <header class="topbar"><div class="eyebrow">KREA GATEWAY <span>/</span> PRE-PRODUCTION</div><div id="lastRefresh">等待同步</div></header>
+      <section class="intro" id="overview">
+        <div><p class="kicker">VIDEO COMPUTE CONTROL</p><h1>每一次生成，<br><em>都有据可查。</em></h1><p>实时读取上游积分报价，按余额选择账号，并记录任务最终消耗。</p></div>
+        <div class="intro-actions"><button class="primary" id="newTaskBtn">创建视频任务 <span>↗</span></button><button class="ghost" id="costBtn">查看积分预估 <span>→</span></button></div>
+      </section>
+
+      <section class="metrics" aria-label="状态概览">
+        <article><span>可用账号</span><strong id="accountCount">—</strong><small>已启用且配置项目</small></article>
+        <article><span>账户积分合计</span><strong id="balanceTotal">—</strong><small>最近一次上游余额</small></article>
+        <article><span>进行中</span><strong id="runningCount">—</strong><small>排队与运行任务</small></article>
+        <article><span>已完成</span><strong id="doneCount">—</strong><small>当前任务记录</small></article>
+      </section>
+
+      <section class="section" id="accounts"><div class="section-heading"><div><p class="eyebrow">01 / ACCOUNTS</p><h2>账号池</h2></div><button class="text-button" id="refreshBtn">刷新余额 ↻</button></div><div id="accountGrid" class="account-grid"></div><p class="empty" id="accountEmpty" hidden>尚未同步浏览器账号。可使用仓库中的 CDP 导入脚本连接已登录的 Krea 浏览器。</p></section>
+
+      <section class="section" id="tasks"><div class="section-heading"><div><p class="eyebrow">02 / TASKS</p><h2>任务流水</h2></div><span class="section-caption">自动刷新 · 最近 100 条</span></div><div class="table-wrap"><table><thead><tr><th>任务</th><th>模型 / 格式</th><th>账号</th><th>状态</th><th>预估积分</th><th>实际积分</th><th>结果</th></tr></thead><tbody id="taskRows"></tbody></table><p class="empty" id="taskEmpty" hidden>暂无任务记录。</p></div></section>
+    </main>
+  </div>
+
+  <dialog id="loginDialog" class="login-dialog"><form id="loginForm"><div class="brand-mark">K<span>↗</span></div><p class="eyebrow">RESTRICTED ACCESS</p><h2>进入控制台</h2><p>输入部署时设置的管理令牌。</p><label for="adminToken">管理令牌</label><input id="adminToken" type="password" autocomplete="current-password" required><button class="primary" type="submit">登录 <span>→</span></button><p id="loginError" class="error"></p></form></dialog>
+
+  <dialog id="costDialog" class="panel-dialog"><div class="dialog-head"><div><p class="eyebrow">LIVE UPSTREAM QUOTE</p><h2>积分预估</h2></div><button class="close" data-close="costDialog" aria-label="关闭">×</button></div><p class="dialog-note">询价直接调用 Krea 的 `/api/jobs/estimate`，不会提交生成任务。</p><form id="costForm" class="form-grid"><label>模型<select name="model" id="costModel"></select></label><label>时长 / 秒<input name="duration" type="number" min="2" max="30" value="5"></label><label>分辨率<select name="resolution" id="costResolution"></select></label><label>画幅比<select name="aspect_ratio"><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option><option>21:9</option></select></label><label>参考视频数量<input name="video_count" type="number" min="0" max="10" value="0"></label><label>参考视频总时长 / 秒<input name="video_seconds" type="number" min="0" max="100" step="0.1" value="0"></label><button class="primary wide" type="submit">向上游询价 <span>→</span></button></form><div id="quoteResult" class="quote-result"></div><div class="sample-head"><h3>实际消耗样本</h3><span id="sampleCount"></span></div><div id="costSamples" class="samples"></div></dialog>
+
+  <dialog id="taskDialog" class="panel-dialog"><div class="dialog-head"><div><p class="eyebrow">NEW GENERATION</p><h2>创建视频任务</h2></div><button class="close" data-close="taskDialog" aria-label="关闭">×</button></div><form id="taskForm" class="form-grid"><label>模型<select name="model" id="taskModel"></select></label><label>时长 / 秒<input name="duration" type="number" min="2" max="30" value="5"></label><label>分辨率<select name="resolution" id="taskResolution"></select></label><label>画幅比<select name="aspect_ratio"><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option><option>21:9</option></select></label><label class="wide">提示词<textarea name="prompt" rows="4" required placeholder="描述视频；素材可在提示词中引用 图1、视频1、音频1…"></textarea></label><label class="wide">图片链接 <small>每行一条</small><textarea name="image_urls" rows="2" placeholder="https://..."></textarea></label><label class="wide">视频链接 <small>每行一条</small><textarea name="video_urls" rows="2" placeholder="https://..."></textarea></label><label class="wide">音频链接 <small>每行一条</small><textarea name="audio_urls" rows="2" placeholder="https://..."></textarea></label><label class="check wide"><input name="generate_audio" type="checkbox" checked> 同步生成声音</label><button class="primary wide" type="submit">提交任务 <span>↗</span></button></form><p id="taskFormMessage" class="dialog-note"></p></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

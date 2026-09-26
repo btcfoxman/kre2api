@@ -1,0 +1,32 @@
+services:
+  kre2api:
+    image: ${IMAGE_REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-btcfoxman}/${IMAGE_NAME:-kre2api}:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kre2api
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-Asia/Taipei}
+      PYTHONUNBUFFERED: "1"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "${KRE2API_PORT:-8800}:8796"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8796/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - my-shared-net
+
+networks:
+  my-shared-net:
+    external: true

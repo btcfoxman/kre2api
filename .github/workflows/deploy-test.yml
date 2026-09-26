@@ -1,0 +1,100 @@
+name: Pre-production Docker
+
+on:
+  push:
+    branches: [pre]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: kre2api-pre-production
+  cancel-in-progress: false
+
+env:
+  IMAGE_REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: btcfoxman
+  IMAGE_NAME: kre2api
+  IMAGE_REF: ghcr.io/btcfoxman/kre2api
+  DEPLOY_PATH: /home/btcfoxman/docker/kre2api
+  DEPLOY_SERVICE: kre2api
+  PUBLIC_HEALTH: https://kre2api.aiid.edu.kg/health
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test protocol mapping and account reservations
+        run: |
+          python -m pip install -r requirements-dev.txt
+          python -m pytest -q tests
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.IMAGE_REF }}:${{ github.sha }}
+            ${{ env.IMAGE_REF }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+          sbom: false
+
+  deploy:
+    needs: build
+    runs-on: [self-hosted, linux, x64, kre2api-pre]
+    env:
+      IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pull and restart service
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -m 750 "$DEPLOY_PATH"
+          test -f "$DEPLOY_PATH/.env"
+          install -m 644 docker-compose.yml "$DEPLOY_PATH/docker-compose.yml"
+          cd "$DEPLOY_PATH"
+          docker network inspect my-shared-net >/dev/null 2>&1 || docker network create my-shared-net
+          export IMAGE_REGISTRY IMAGE_NAMESPACE IMAGE_NAME IMAGE_TAG
+          for attempt in 1 2 3; do
+            if docker compose pull "$DEPLOY_SERVICE"; then break; fi
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            sleep $((attempt * 15))
+          done
+          docker compose up -d --no-build --remove-orphans "$DEPLOY_SERVICE"
+      - name: Verify local and public health
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if curl -fsS --max-time 5 http://127.0.0.1:8800/health >/dev/null; then break; fi
+            if [ "$attempt" -eq 30 ]; then docker logs --tail 100 kre2api; exit 1; fi
+            sleep 5
+          done
+          for attempt in $(seq 1 30); do
+            if curl -fsS --max-time 10 "$PUBLIC_HEALTH" >/dev/null; then exit 0; fi
+            if [ "$attempt" -eq 30 ]; then exit 1; fi
+            sleep 5
+          done

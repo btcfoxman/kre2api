@@ -1,0 +1,1 @@
+"""Krea video gateway."""
