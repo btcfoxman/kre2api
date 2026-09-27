@@ -37,9 +37,15 @@ GET /v1/videos/{task_id}/content
 
 ## 积分询价与管理页
 
-`POST /api/quote` 接收同样的请求参数，但只向 Krea 询价，不创建视频。返回各账号余额、预估消耗和可用性。管理页位于 `/`，使用 `KR_ADMIN_TOKEN` 登录，可查看账号、任务、实际扣费样本，也可用弹窗询价和提交任务。一次仅向同一账号分派一个任务，避免预留积分与余额差相互干扰。
+`POST /api/quote` 接收同样的请求参数，但只向 Krea 询价，不创建视频。返回各账号余额、预估消耗和可用性。管理页位于 `/`，使用 `KR_ADMIN_TOKEN` 登录，可查看账号、任务、实际扣费样本，也可用弹窗询价和提交任务。每个账号的并发上限默认是 1，可在账号设置或批量导入时调整为 1–16；预留积分按该账号的全部在途任务计算。
+
+同一账号的任务若时间重叠，余额差无法准确归属某一任务；这类任务的实际消耗会保持为空，不作为动态报价样本。任务仍保留提交前的预估消耗。
 
 管理页布局与 ak2api 控制台一致，提供账号启停和更新、任务详情（调用者请求、实际 Krea 提交请求、上游提交与轮询响应、调用者响应）、测试提交、实时询价、历史消耗、运行设置和接入文档。运行设置通过 `GET/PATCH /api/admin/settings` 持久化轮询间隔与任务超时；任务线程数由部署环境变量 `KR_TASK_WORKERS` 控制。`GET /api/admin/tasks/{task_id}` 提供完整任务详情，`DELETE /api/admin/tasks/finished` 清理已结束任务，历史积分样本会保留。上述管理接口仅接受管理员会话或管理令牌。
+
+批量导入支持每行 `邮箱|密码|代理`，代理可留空，也可写 `host:port`、`http(s)://...` 或 `socks5://...`。同一批次重复邮箱以最后一行为准；导入结果逐行报告格式错误、合并数量和启动登录数量。`POST /api/accounts/batch-import` 与管理页“批量导入”使用同一流程，示例请求体为 `{"text":"user@example.com|password|socks5://host:1080","start_login":true,"max_concurrency":1}`。密码以加密形式存入 SQLite，不通过管理 API 返回；加密密钥优先使用 `KR_CREDENTIAL_KEY`，未配置时使用 `KR_ADMIN_TOKEN`，更换密钥后需重新导入密码。建议在第一次导入前固定配置 `KR_CREDENTIAL_KEY`。
+
+导入后使用容器中的 Chromium 打开 Krea 原生登录页，继承该账号代理出口，并在登录成功后读取 Cookie、余额及现有视频项目。Cloudflare 验证若无法自动完成，账号显示“待网页验证”，不会进入任务账号池；可按下方 CDP 同步方式手动补充会话。若账号尚无视频项目，则显示“缺少项目”，需先在 Krea 网页创建并在账号设置填写项目 ID。账号行可重试登录。浏览器资料保存在 `/app/data/kr-chrome-profiles`，应和 SQLite 数据库一样避免提交到 Git。
 
 ## 运行
 
@@ -50,7 +56,7 @@ docker network create my-shared-net 2>/dev/null || true
 docker compose up -d --build
 ```
 
-浏览器账号先由用户手动登录，随后使用 `scripts/import_cdp.py` 从 CDP 导入会话。脚本需要已登录的浏览器调试地址、账号对应项目 ID 和 `KR_SYNC_TOKEN`；不会在控制台输出 Cookie。示例：
+对于需要人工验证的账号，可先由用户手动登录，再使用 `scripts/import_cdp.py` 从 CDP 导入会话。脚本需要已登录的浏览器调试地址、账号对应项目 ID 和 `KR_SYNC_TOKEN`；不会在控制台输出 Cookie。示例：
 
 ```bash
 export KR_SYNC_TOKEN='从部署环境读取，不要写入仓库'

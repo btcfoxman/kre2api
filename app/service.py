@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import statistics
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 from .catalog import normalize_request
 from .client import KreaClient, KreaError, TERMINAL_STATUSES
+from .browser_login import KreaLoginError, login as browser_login
+from .credentials import decrypt_password
 from .store import Store
 
 
@@ -60,8 +64,13 @@ class Service:
         self.poll_thread: threading.Thread | None = None
         self.inflight: set[str] = set()
         self.lock = threading.Lock()
+        self.login_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="kre-login")
+        self.login_inflight: set[int] = set()
 
     def start(self) -> None:
+        for account in self.store.accounts():
+            if account["enabled"] and account["has_password"] and account["login_status"] in {"login_pending", "logging_in"}:
+                self.schedule_login(account["id"])
         for task in self.store.pending_tasks():
             if task["status"] == "submitting" and not task["upstream_job_id"]:
                 self.store.update_task(task["id"], status="failed", reserved_cost=0,
@@ -77,6 +86,54 @@ class Service:
         if self.poll_thread:
             self.poll_thread.join(timeout=3)
         self.executor.shutdown(wait=False, cancel_futures=True)
+        self.login_executor.shutdown(wait=False, cancel_futures=True)
+
+    def schedule_login(self, account_id: int) -> bool:
+        with self.lock:
+            account = self.store.account(account_id)
+            if not account or not account["enabled"] or not account["has_password"] or account_id in self.login_inflight:
+                return False
+            self.login_inflight.add(account_id)
+            self.store.set_account(account_id, login_status="login_pending", last_error="")
+        try:
+            future = self.login_executor.submit(self._login_account, account_id)
+            future.add_done_callback(lambda _: self._finish_login(account_id))
+            return True
+        except Exception:
+            self._finish_login(account_id)
+            raise
+
+    def _finish_login(self, account_id: int) -> None:
+        with self.lock:
+            self.login_inflight.discard(account_id)
+
+    def _login_account(self, account_id: int) -> None:
+        account = self.store.account(account_id)
+        if not account or not account["enabled"]:
+            return
+        self.store.set_account(account_id, login_status="logging_in")
+        try:
+            password = decrypt_password(self.store.credential(account_id))
+            data_dir = Path(os.getenv("KR_DATA_DIR", "/app/data"))
+            cookies, user_agent, project, balance = browser_login(
+                account_id, account["name"], password, account["proxy_url"], data_dir)
+            candidate = {**account, "cookies": cookies, "user_agent": user_agent}
+            client = self._client(candidate)
+            verified_balance = client.balance()
+            self.store.set_account(account_id, cookies=cookies, user_agent=user_agent,
+                                   project_id=account["project_id"] or project,
+                                   balance=verified_balance if verified_balance is not None else balance,
+                                   login_status="ready" if account["project_id"] or project else "project_required",
+                                   last_error="" if account["project_id"] or project else "Create a Krea video project and set its ID")
+        except KreaLoginError as exc:
+            self.store.set_account(account_id, login_status=exc.status, last_error=str(exc))
+        except KreaError as exc:
+            status = "session_required" if exc.status_code in {401, 403} else "network_error" if exc.retryable or exc.status_code >= 500 else "login_failed"
+            self.store.set_account(account_id, login_status=status,
+                                   last_error=f"Krea session check failed (HTTP {exc.status_code})")
+        except Exception as exc:
+            self.store.set_account(account_id, login_status="login_failed",
+                                   last_error=f"Krea login failed: {type(exc).__name__}")
 
     @staticmethod
     def _client(account: dict[str, Any]) -> KreaClient:
@@ -102,7 +159,8 @@ class Service:
     def create(self, request: dict[str, Any]) -> dict[str, Any]:
         normalized = normalize_request(request)
         accounts = [account for account in self.store.accounts(enabled_only=True)
-                    if account.get("project_id")]
+                    if account.get("project_id") and account.get("cookies")
+                    and account.get("login_status") == "ready"]
         if requested_account := request.get("account_id"):
             accounts = [account for account in accounts if account["id"] == int(requested_account)]
         if not accounts:
@@ -207,7 +265,8 @@ class Service:
         balance_after = client.balance()
         observed = max(0.0, float(task.get("balance_before") or 0) - balance_after)
         estimate = float(task.get("estimated_cost") or 0)
-        actual = observed if 0.5 * estimate <= observed <= 1.5 * estimate else estimate
+        actual = (observed if not self.store.task_overlapped(task)
+                  and 0.5 * estimate <= observed <= 1.5 * estimate else None)
         if status == "completed":
             urls = result_urls(job)
             if urls:
@@ -218,7 +277,8 @@ class Service:
                 refreshed = self.store.task(task["id"])
                 video_seconds = sum(float(item.get("duration") or 0)
                                     for item in refreshed["normalized"]["videos"])
-                self.store.record_cost(refreshed, actual, video_seconds)
+                if actual is not None:
+                    self.store.record_cost(refreshed, actual, video_seconds)
             else:
                 self.store.update_task(task["id"], status="failed", reserved_cost=0,
                                        balance_after=balance_after,

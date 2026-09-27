@@ -15,6 +15,7 @@ def test_admin_settings_account_and_task_detail(tmp_path, monkeypatch):
     main = importlib.import_module("app.main")
     with TestClient(main.app) as client:
         assert client.get("/api/admin/settings").status_code == 401
+        assert client.post("/api/accounts/batch-import", json={"text": "a@example.com|secret"}).status_code == 401
         assert client.post("/api/admin/login", json={"token": "test-admin-token"}).status_code == 200
         settings = client.get("/api/admin/settings").json()
         assert settings["poll_interval_seconds"] >= 2
@@ -53,3 +54,20 @@ def test_admin_settings_account_and_task_detail(tmp_path, monkeypatch):
         main.store.update_task("kre_detail", status="failed", reserved_cost=0, error="upstream error")
         assert client.delete("/api/admin/tasks/finished").json() == {"deleted": 1}
         assert client.get("/api/admin/tasks/kre_detail").status_code == 404
+
+        imported = client.post("/api/accounts/batch-import", json={
+            "text": "batch@example.com|private-password|localhost:8080\n"
+                    "bad line\n"
+                    "batch@example.com|new-password|localhost:8081",
+            "start_login": False, "max_concurrency": 3,
+        })
+        assert imported.status_code == 200
+        result = imported.json()
+        assert result["count"] == 1 and result["duplicate_count"] == 1
+        assert result["errors"][0]["line"] == 2
+        assert result["accounts"][0]["max_concurrency"] == 3
+        assert result["accounts"][0]["login_status"] == "login_pending"
+        assert "private-password" not in imported.text and "new-password" not in imported.text
+        assert "password_ciphertext" not in client.get("/api/admin/accounts").text
+        account_id = result["accounts"][0]["id"]
+        assert "new-password" not in main.store.credential(account_id)

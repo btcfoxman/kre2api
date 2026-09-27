@@ -35,9 +35,12 @@ class Store:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL UNIQUE,
                     cookies_json TEXT NOT NULL,
+                    password_ciphertext TEXT NOT NULL DEFAULT '',
+                    login_status TEXT NOT NULL DEFAULT 'session_required',
                     proxy_url TEXT NOT NULL DEFAULT '',
                     user_agent TEXT NOT NULL DEFAULT '',
                     project_id TEXT NOT NULL DEFAULT '',
+                    max_concurrency INTEGER NOT NULL DEFAULT 1,
                     enabled INTEGER NOT NULL DEFAULT 1,
                     balance REAL,
                     last_error TEXT NOT NULL DEFAULT '',
@@ -90,11 +93,20 @@ class Store:
             for column in ("upstream_request_json", "upstream_response_json"):
                 if column not in task_columns:
                     db.execute(f"ALTER TABLE tasks ADD COLUMN {column} TEXT NOT NULL DEFAULT '{{}}'")
+            account_columns = {row["name"] for row in db.execute("PRAGMA table_info(accounts)")}
+            if "password_ciphertext" not in account_columns:
+                db.execute("ALTER TABLE accounts ADD COLUMN password_ciphertext TEXT NOT NULL DEFAULT ''")
+            if "login_status" not in account_columns:
+                db.execute("ALTER TABLE accounts ADD COLUMN login_status TEXT NOT NULL DEFAULT 'session_required'")
+                db.execute("UPDATE accounts SET login_status='ready' WHERE cookies_json!='[]'")
+            if "max_concurrency" not in account_columns:
+                db.execute("ALTER TABLE accounts ADD COLUMN max_concurrency INTEGER NOT NULL DEFAULT 1")
 
     @staticmethod
     def _account(row: sqlite3.Row) -> dict[str, Any]:
         result = dict(row)
         result["cookies"] = json.loads(result.pop("cookies_json"))
+        result["has_password"] = bool(result.pop("password_ciphertext"))
         result["enabled"] = bool(result["enabled"])
         return result
 
@@ -108,23 +120,44 @@ class Store:
         result["upstream_response"] = json.loads(result.pop("upstream_response_json"))
         return result
 
-    def upsert_account(self, *, name: str, cookies: list[dict[str, Any]],
-                       proxy_url: str = "", user_agent: str = "", project_id: str = "",
-                       enabled: bool = True) -> dict[str, Any]:
-        if not name.strip() or not cookies:
-            raise ValueError("account name and browser cookies are required")
+    def upsert_account(self, *, name: str, cookies: list[dict[str, Any]] | None = None,
+                       password_ciphertext: str | None = None, proxy_url: str | None = None,
+                       user_agent: str | None = None, project_id: str | None = None,
+                       enabled: bool = True, login_status: str | None = None,
+                       max_concurrency: int | None = None) -> dict[str, Any]:
+        if not name.strip():
+            raise ValueError("account name is required")
+        if max_concurrency is not None and (isinstance(max_concurrency, bool) or not 1 <= max_concurrency <= 16):
+            raise ValueError("max_concurrency must be between 1 and 16")
         now = time.time()
         with self._connect() as db:
+            old = db.execute("SELECT * FROM accounts WHERE name=?", (name.strip(),)).fetchone()
+            if not old and not (cookies or password_ciphertext):
+                raise ValueError("browser cookies or password are required")
+            saved_cookies = cookies if cookies is not None else json.loads(old["cookies_json"]) if old else []
+            saved_password = password_ciphertext if password_ciphertext is not None else old["password_ciphertext"] if old else ""
+            saved_status = login_status or ("ready" if cookies else old["login_status"] if old else "login_pending")
             db.execute("""
-                INSERT INTO accounts(name,cookies_json,proxy_url,user_agent,project_id,enabled,updated_at)
-                VALUES(?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET
-                  cookies_json=excluded.cookies_json,proxy_url=excluded.proxy_url,
+                INSERT INTO accounts(name,cookies_json,password_ciphertext,login_status,proxy_url,user_agent,project_id,max_concurrency,enabled,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET
+                  cookies_json=excluded.cookies_json,password_ciphertext=excluded.password_ciphertext,
+                  login_status=excluded.login_status,proxy_url=excluded.proxy_url,
                   user_agent=excluded.user_agent,project_id=excluded.project_id,
+                  max_concurrency=excluded.max_concurrency,
                   enabled=excluded.enabled,last_error='',updated_at=excluded.updated_at
-            """, (name.strip(), _json(cookies), proxy_url, user_agent, project_id,
+            """, (name.strip(), _json(saved_cookies), saved_password, saved_status,
+                  proxy_url if proxy_url is not None else old["proxy_url"] if old else "",
+                  user_agent if user_agent is not None else old["user_agent"] if old else "",
+                  project_id if project_id is not None else old["project_id"] if old else "",
+                  max_concurrency if max_concurrency is not None else old["max_concurrency"] if old else 1,
                   int(enabled), now))
             row = db.execute("SELECT * FROM accounts WHERE name=?", (name.strip(),)).fetchone()
         return self._account(row)
+
+    def credential(self, account_id: int) -> str:
+        with self._connect() as db:
+            row = db.execute("SELECT password_ciphertext FROM accounts WHERE id=?", (account_id,)).fetchone()
+        return str(row[0]) if row else ""
 
     def accounts(self, enabled_only: bool = False) -> list[dict[str, Any]]:
         with self._connect() as db:
@@ -141,7 +174,10 @@ class Store:
                     cookies: list[dict[str, Any]] | None = None,
                     last_error: str | None = None, enabled: bool | None = None,
                     proxy_url: str | None = None,
-                    project_id: str | None = None) -> None:
+                    project_id: str | None = None,
+                    user_agent: str | None = None,
+                    login_status: str | None = None,
+                    max_concurrency: int | None = None) -> None:
         changes: dict[str, Any] = {"updated_at": time.time()}
         if balance is not None:
             changes["balance"] = balance
@@ -155,6 +191,14 @@ class Store:
             changes["proxy_url"] = proxy_url
         if project_id is not None:
             changes["project_id"] = project_id
+        if user_agent is not None:
+            changes["user_agent"] = user_agent
+        if login_status is not None:
+            changes["login_status"] = login_status
+        if max_concurrency is not None:
+            if isinstance(max_concurrency, bool) or not 1 <= max_concurrency <= 16:
+                raise ValueError("max_concurrency must be between 1 and 16")
+            changes["max_concurrency"] = max_concurrency
         sql = "UPDATE accounts SET " + ",".join(f"{key}=?" for key in changes) + " WHERE id=?"
         with self._connect() as db:
             db.execute(sql, (*changes.values(), account_id))
@@ -167,7 +211,8 @@ class Store:
             db.execute("BEGIN IMMEDIATE")
             active = db.execute("SELECT COUNT(*) FROM tasks WHERE account_id=? AND status NOT IN ('succeeded','failed','expired')",
                                 (account_id,)).fetchone()[0]
-            if active:
+            limit_row = db.execute("SELECT max_concurrency FROM accounts WHERE id=?", (account_id,)).fetchone()
+            if not limit_row or active >= limit_row[0]:
                 return False
             reserved = db.execute("SELECT COALESCE(SUM(reserved_cost),0) FROM tasks WHERE account_id=? AND status NOT IN ('succeeded','failed','expired')",
                                   (account_id,)).fetchone()[0]
@@ -195,7 +240,17 @@ class Store:
                 return False
             db.execute("UPDATE tasks SET estimated_cost=?,reserved_cost=?,updated_at=? WHERE id=?",
                        (new_cost, new_cost, time.time(), task_id))
-        return True
+            return True
+
+    def task_overlapped(self, task: dict[str, Any]) -> bool:
+        with self._connect() as db:
+            row = db.execute("""SELECT COUNT(*) FROM tasks
+                                WHERE account_id=? AND id!=? AND created_at<=?
+                                  AND (status NOT IN ('succeeded','failed','expired')
+                                       OR updated_at>=?)""",
+                             (task["account_id"], task["id"], time.time(),
+                              task["created_at"])).fetchone()
+        return bool(row[0])
 
     def task(self, task_id: str) -> dict[str, Any] | None:
         with self._connect() as db:

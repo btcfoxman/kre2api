@@ -14,7 +14,9 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .catalog import MODELS, normalize_request, public_models
+from .batch import parse_batch
 from .client import KreaClient, KreaError
+from .credentials import encrypt_password
 from .service import Service
 from .store import Store
 
@@ -201,6 +203,8 @@ def quote(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
         video_seconds = sum(float(item.get("duration") or 0) for item in normalized["videos"])
         output = []
         for account in store.accounts(enabled_only=True):
+            if not account["cookies"] or account["login_status"] != "ready":
+                continue
             if body.get("account_id") and account["id"] != int(body["account_id"]):
                 continue
             try:
@@ -223,7 +227,8 @@ def quote(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
 
 
 def _public_account(account: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in account.items() if key != "cookies"}
+    return {**{key: value for key, value in account.items() if key != "cookies"},
+            "cookies_ready": bool(account.get("cookies"))}
 
 
 @app.get("/api/admin/accounts", dependencies=[Depends(admin_auth)])
@@ -243,23 +248,86 @@ def upsert_account(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
         existing = next((item for item in store.accounts()
                          if item["name"] == str(body.get("name") or "").strip()), None)
         account = store.upsert_account(name=str(body.get("name") or ""),
-                                       cookies=body.get("cookies") or (existing["cookies"] if existing else []),
+                                       cookies=body.get("cookies"),
                                        proxy_url=str(body.get("proxy_url") or ""),
                                        user_agent=str(body.get("user_agent") or (existing["user_agent"] if existing else "")),
                                        project_id=str(body.get("project_id") or ""),
+                                       max_concurrency=int(body["max_concurrency"]) if "max_concurrency" in body
+                                       else existing["max_concurrency"] if existing else 1,
+                                       login_status=("ready" if body.get("project_id") else "project_required")
+                                       if body.get("cookies") else
+                                       ("ready" if existing and existing["cookies"]
+                                        and existing["login_status"] == "project_required"
+                                        and body.get("project_id") else None),
                                        enabled=bool(body.get("enabled", True)))
         return _public_account(account)
     except Exception as exc:
         raise _raise(exc) from exc
 
 
+@app.post("/api/accounts/batch-import", dependencies=[Depends(admin_auth)])
+@app.post("/api/admin/accounts/batch-import", dependencies=[Depends(admin_auth)])
+def batch_import_accounts(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    source = body.get("text")
+    if not isinstance(source, str):
+        raise HTTPException(status_code=422, detail="text must be a string")
+    try:
+        entries, errors = parse_batch(source)
+        concurrency = int(body.get("max_concurrency", 1))
+        if not 1 <= concurrency <= 16:
+            raise ValueError("max_concurrency must be between 1 and 16")
+    except ValueError as exc:
+        raise _raise(exc) from exc
+    parse_error_count = len(errors)
+    imported = []
+    started = 0
+    existing_count = 0
+    old_by_name = {item["name"].casefold(): item for item in store.accounts()}
+    for entry in entries:
+        try:
+            old = old_by_name.get(entry["name"].casefold())
+            if old:
+                existing_count += 1
+            account = store.upsert_account(
+                name=old["name"] if old else entry["name"],
+                password_ciphertext=encrypt_password(entry["password"]),
+                proxy_url=(entry["proxy_url"] or old["proxy_url"]) if old else entry["proxy_url"],
+                login_status="login_pending" if not old or not old["cookies"] else old["login_status"],
+                max_concurrency=concurrency,
+                enabled=True,
+            )
+            imported.append(_public_account(account))
+            if bool(body.get("start_login", True)) and service.schedule_login(account["id"]):
+                started += 1
+        except Exception as exc:
+            errors.append({"line": entry["line"], "message": str(exc)[:200]})
+    input_count = sum(bool(line.strip()) and not line.lstrip().startswith("#") for line in source.splitlines())
+    return {"accounts": imported, "count": len(imported), "input_count": input_count,
+            "duplicate_count": max(0, input_count - len(entries) - parse_error_count) + existing_count,
+            "existing_count": existing_count, "login_started": bool(body.get("start_login", True)),
+            "login_started_count": started, "errors": errors}
+
+
+@app.post("/api/admin/accounts/{account_id}/login", dependencies=[Depends(admin_auth)])
+def login_account(account_id: int) -> dict[str, Any]:
+    account = store.account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="account not found")
+    if not account["has_password"]:
+        raise HTTPException(status_code=422, detail="account has no imported password")
+    started = service.schedule_login(account_id)
+    return {"started": started, "account": _public_account(store.account(account_id))}
+
+
 @app.patch("/api/admin/accounts/{account_id}", dependencies=[Depends(admin_auth)])
 def patch_account(account_id: int, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     if not store.account(account_id):
         raise HTTPException(status_code=404, detail="account not found")
-    allowed = {"enabled", "proxy_url", "project_id"}
+    allowed = {"enabled", "proxy_url", "project_id", "max_concurrency"}
     if set(body) - allowed:
         raise HTTPException(status_code=422, detail="unsupported account patch fields")
+    if body.get("project_id") and store.account(account_id)["cookies"]:
+        body["login_status"] = "ready"
     store.set_account(account_id, **body)
     return _public_account(store.account(account_id))
 
@@ -273,10 +341,12 @@ def refresh_account(account_id: int) -> dict[str, Any]:
         client = service._client(account)
         balance = client.balance()
         store.set_account(account_id, balance=balance, cookies=client.export_cookies(),
-                          last_error="")
+                          last_error="", login_status="ready" if account["project_id"] else "project_required")
         return _public_account(store.account(account_id))
     except Exception as exc:
-        store.set_account(account_id, last_error=str(exc)[:600])
+        store.set_account(account_id, last_error=str(exc)[:600],
+                          login_status="session_required" if isinstance(exc, KreaError)
+                          and exc.status_code in {401, 403} else account["login_status"])
         raise _raise(exc) from exc
 
 

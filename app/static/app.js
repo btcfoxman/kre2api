@@ -30,16 +30,18 @@ function renderAccounts() {
   const enabled = accounts.filter((item) => item.enabled);
   $("#enabledCount").textContent = enabled.length;
   $("#disabledCount").textContent = accounts.length - enabled.length;
-  $("#metricAccounts").textContent = enabled.filter((item) => item.project_id).length + " / " + accounts.length;
+  $("#metricAccounts").textContent = enabled.filter((item) => item.project_id && item.cookies_ready && item.login_status === "ready").length + " / " + accounts.length;
   $("#metricBalance").textContent = num(accounts.reduce((sum, item) => sum + Number(item.balance || 0), 0));
   const visible = accounts.filter((item) => item.enabled === (state.accountFilter === "enabled"));
   $("#accountsEmpty").classList.toggle("show", !visible.length);
   $("#accountsBody").innerHTML = visible.map((item) => {
-    const status = item.enabled && item.project_id ? "可用" : item.enabled ? "缺少项目" : "已停用";
-    const statusClass = item.enabled && item.project_id ? "active" : "failed";
+    const ready = item.enabled && item.project_id && item.cookies_ready && item.login_status === "ready";
+    const labels = {login_pending:"待登录", logging_in:"登录中", challenge_required:"待网页验证", login_failed:"登录失败", network_error:"网络异常", project_required:"缺少项目", session_required:"缺少会话"};
+    const status = !item.enabled ? "已停用" : ready ? "可用" : labels[item.login_status] || "待检测";
+    const statusClass = ready ? "active" : "failed";
     return '<tr><td><span class="cell-title"><span class="account-id">#' + item.id + '</span>' + esc(item.name) + '</span><span class="cell-sub" title="' + esc(item.last_error || "") + '">' + esc(item.last_error || "Krea 浏览器会话") + '</span></td>' +
-      '<td><span class="badge ' + statusClass + '">' + status + '</span></td><td class="mono">' + num(item.balance) + '</td><td class="mono">' + esc(item.project_id || "—") + '</td><td class="proxy mono" title="' + esc(item.proxy_url || "") + '">' + esc(item.proxy_url || "直连") + '</td><td>' + stamp(item.updated_at) + '</td>' +
-      '<td><div class="row-actions"><button class="icon-button" data-action="refresh" data-id="' + item.id + '" title="刷新余额"><i data-lucide="refresh-cw"></i></button><button class="icon-button" data-action="edit" data-id="' + item.id + '" title="设置账号"><i data-lucide="pencil"></i></button><button class="icon-button" data-action="toggle" data-id="' + item.id + '" title="' + (item.enabled ? "停用" : "启用") + '"><i data-lucide="' + (item.enabled ? "pause" : "play") + '"></i></button></div></td></tr>';
+      '<td><span class="badge ' + statusClass + '">' + status + '</span></td><td class="mono">' + num(item.balance) + '</td><td class="mono">' + esc(item.project_id || "—") + '</td><td class="proxy mono" title="' + esc(item.proxy_url || "") + '">' + esc(item.proxy_url || "直连") + '</td><td>' + esc(item.max_concurrency || 1) + '</td><td>' + stamp(item.updated_at) + '</td>' +
+      '<td><div class="row-actions">' + (item.has_password ? '<button class="icon-button" data-action="login" data-id="' + item.id + '" title="重试登录"><i data-lucide="log-in"></i></button>' : '') + '<button class="icon-button" data-action="refresh" data-id="' + item.id + '" title="刷新余额"><i data-lucide="refresh-cw"></i></button><button class="icon-button" data-action="edit" data-id="' + item.id + '" title="设置账号"><i data-lucide="pencil"></i></button><button class="icon-button" data-action="toggle" data-id="' + item.id + '" title="' + (item.enabled ? "停用" : "启用") + '"><i data-lucide="' + (item.enabled ? "pause" : "play") + '"></i></button></div></td></tr>';
   }).join("");
   icons();
 }
@@ -83,7 +85,7 @@ function updateModel(prefix) {
 function accountOptions() {
   const taskValue = $("#taskAccount").value;
   const costValue = $("#costAccount").value;
-  const options = '<option value="">自动选择</option>' + state.accounts.filter((item) => item.enabled).map((item) =>
+  const options = '<option value="">自动选择</option>' + state.accounts.filter((item) => item.enabled && item.cookies_ready && item.project_id && item.login_status === "ready").map((item) =>
     '<option value="' + item.id + '">' + esc(item.name) + ' · ' + num(item.balance) + '</option>').join("");
   $("#taskAccount").innerHTML = options;
   $("#costAccount").innerHTML = options;
@@ -149,6 +151,7 @@ function openAccount(account) {
   form.elements.name.value = account?.name || "";
   form.elements.name.readOnly = !!account;
   form.elements.project_id.value = account?.project_id || "";
+  form.elements.max_concurrency.value = account?.max_concurrency || 1;
   form.elements.proxy_url.value = account?.proxy_url || "";
   form.elements.user_agent.value = account?.user_agent || "";
   form.elements.enabled.checked = account?.enabled ?? true;
@@ -174,7 +177,7 @@ $("#logoutButton").addEventListener("click", async () => {
 $("#refreshButton").addEventListener("click", refresh);
 $("#tasksRefresh").addEventListener("click", refresh);
 $("#accountsRefresh").addEventListener("click", async () => {
-  const accounts = state.accounts.filter((item) => item.enabled);
+  const accounts = state.accounts.filter((item) => item.enabled && item.cookies_ready && item.login_status === "ready");
   const outcome = await Promise.allSettled(accounts.map((item) => api("/api/admin/accounts/" + item.id + "/refresh", {method:"POST"})));
   toast(outcome.filter((item) => item.status === "fulfilled").length + " / " + accounts.length + " 个账号已刷新");
   await refresh();
@@ -185,6 +188,7 @@ $("#accountsBody").addEventListener("click", async (event) => {
   if (button.dataset.action === "edit") return openAccount(account);
   try {
     if (button.dataset.action === "refresh") await api("/api/admin/accounts/" + account.id + "/refresh", {method:"POST"});
+    if (button.dataset.action === "login") await api("/api/admin/accounts/" + account.id + "/login", {method:"POST"});
     if (button.dataset.action === "toggle") await api("/api/admin/accounts/" + account.id, {method:"PATCH", body:JSON.stringify({enabled:!account.enabled})});
     await refresh(); toast("账号已更新");
   } catch (error) { toast(error.message, true); }
@@ -198,13 +202,25 @@ $("#accountForm").addEventListener("submit", async (event) => {
       cookies = JSON.parse(values.cookies);
       if (!Array.isArray(cookies) || !cookies.length) throw new Error("Cookie JSON 必须是非空数组");
     }
-    const body = {name:values.name.trim(), project_id:values.project_id.trim(), proxy_url:values.proxy_url.trim(), user_agent:values.user_agent.trim(), enabled:form.elements.enabled.checked};
+    const body = {name:values.name.trim(), project_id:values.project_id.trim(), max_concurrency:Number(values.max_concurrency), proxy_url:values.proxy_url.trim(), user_agent:values.user_agent.trim(), enabled:form.elements.enabled.checked};
     if (cookies.length) body.cookies = cookies;
     await api("/api/admin/accounts", {method:"POST", body:JSON.stringify(body)});
     $("#accountDialog").close(); await refresh(); toast("账号已保存");
   } catch (error) { toast(error.message, true); }
 });
 $("#addAccountButton").addEventListener("click", () => openAccount(null));
+$("#batchButton").addEventListener("click", () => { $("#batchResult").hidden = true; $("#batchResult").textContent = ""; show($("#batchDialog")); });
+$("#batchForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget, panel = $("#batchResult");
+  try {
+    const result = await api("/api/accounts/batch-import", {method:"POST", body:JSON.stringify({text:form.elements.text.value, start_login:form.elements.start_login.checked, max_concurrency:Number(form.elements.max_concurrency.value)})});
+    const errors = (result.errors || []).map((item) => `第 ${item.line} 行：${item.message}`).join("\n");
+    panel.hidden = false; panel.classList.toggle("error", !!errors);
+    panel.textContent = `输入 ${result.input_count} · 保存 ${result.count} · 合并 ${result.duplicate_count} · 启动登录 ${result.login_started_count}${errors ? "\n" + errors : ""}`;
+    await refresh(); toast(`已导入 ${result.count} 个账号`);
+  } catch (error) { panel.hidden = false; panel.classList.add("error"); panel.textContent = error.message; toast(error.message, true); }
+});
 $("#newTaskButton").addEventListener("click", () => show($("#taskDialog")));
 $("#taskModel").addEventListener("change", () => updateModel("task"));
 $("#costModel").addEventListener("change", () => updateModel("cost"));
