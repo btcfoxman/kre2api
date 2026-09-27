@@ -267,7 +267,8 @@ $("#costForm").addEventListener("submit", async (event) => {
   const body = {...payload(form), prompt:"询价", video_urls:Array.from({length:count}, (_, index) => ({url:"https://example.invalid/reference-" + (index + 1) + ".mp4", duration:count ? seconds / count : 0}))};
   const box = $("#quoteResult"); box.hidden = false; box.textContent = "正在向 Krea 询价…";
   try { const result = await api("/api/admin/quote", {method:"POST", body:JSON.stringify(body)});
-    box.textContent = result.accounts.length ? result.accounts.map((item) => item.name + "：预估 " + num(item.estimated_cost) + "，余额 " + num(item.balance) + (item.error ? "，" + item.error : item.eligible ? "，可提交" : "，余额不足")).join("\n") : "暂无可询价账号";
+    const reasons = {balance_below_150:"积分低于 150，已自动停用", insufficient_credits:"可用积分不足", busy:"账号并发已满", disabled:"账号已停用"};
+    box.textContent = result.accounts.length ? result.accounts.map((item) => item.name + "：预估 " + num(item.estimated_cost) + "，余额 " + num(item.balance) + (item.reserved_cost ? "，已预留 " + num(item.reserved_cost) : "") + (item.error ? "，" + item.error : item.eligible ? "，可提交" : "，" + (reasons[item.reason] || "不可提交"))).join("\n") : "暂无可询价账号";
   } catch (error) { box.textContent = error.message; toast(error.message, true); }
 });
 (async () => {

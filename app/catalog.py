@@ -98,6 +98,10 @@ def normalize_prompt(prompt: str, counts: dict[str, int]) -> str:
     def replace(match: re.Match[str]) -> str:
         kind = _ALIASES[match.group("kind").lower()]
         index = int(match.group("index"))
+        if index == 0:
+            # Reference labels are one-based. A literal such as "video0" is
+            # ordinary prompt text, even when no video was supplied.
+            return match.group(0)
         if 1 <= index <= counts[kind]:
             return f"@{kind}{index}"
         raise ValueError(f"{kind} reference {index} has no matching uploaded media")

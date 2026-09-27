@@ -58,7 +58,7 @@ def test_failed_media_download_returns_normalized_task_error(tmp_path, monkeypat
                   "images": [], "videos": [], "audios": []}
     assert store.reserve_task(task_id="kre_media", account_id=account["id"],
                               model="sd-2-0", request={}, normalized=normalized,
-                              estimated_cost=1, balance=10)
+                              estimated_cost=1, balance=500)
     service = Service(store)
     media_client = client()
     monkeypatch.setattr(media_client, "prepare_media", lambda _normalized:

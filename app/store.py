@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Any
 
 
+MIN_ACCOUNT_BALANCE = 150.0
+LOW_BALANCE_MESSAGE = "积分低于 150，账号已自动禁用"
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
@@ -101,6 +105,8 @@ class Store:
                 db.execute("UPDATE accounts SET login_status='ready' WHERE cookies_json!='[]'")
             if "max_concurrency" not in account_columns:
                 db.execute("ALTER TABLE accounts ADD COLUMN max_concurrency INTEGER NOT NULL DEFAULT 1")
+            db.execute("UPDATE accounts SET enabled=0,last_error=?,updated_at=? WHERE enabled=1 AND balance IS NOT NULL AND balance<?",
+                       (LOW_BALANCE_MESSAGE, time.time(), MIN_ACCOUNT_BALANCE))
 
     @staticmethod
     def _account(row: sqlite3.Row) -> dict[str, Any]:
@@ -150,7 +156,11 @@ class Store:
                   user_agent if user_agent is not None else old["user_agent"] if old else "",
                   project_id if project_id is not None else old["project_id"] if old else "",
                   max_concurrency if max_concurrency is not None else old["max_concurrency"] if old else 1,
-                  int(enabled), now))
+                  int(enabled and (old is None or old["balance"] is None
+                                   or float(old["balance"]) >= MIN_ACCOUNT_BALANCE)), now))
+            if old and old["balance"] is not None and float(old["balance"]) < MIN_ACCOUNT_BALANCE:
+                db.execute("UPDATE accounts SET last_error=? WHERE name=?",
+                           (LOW_BALANCE_MESSAGE, name.strip()))
             row = db.execute("SELECT * FROM accounts WHERE name=?", (name.strip(),)).fetchone()
         return self._account(row)
 
@@ -199,6 +209,10 @@ class Store:
             if isinstance(max_concurrency, bool) or not 1 <= max_concurrency <= 16:
                 raise ValueError("max_concurrency must be between 1 and 16")
             changes["max_concurrency"] = max_concurrency
+        if balance is not None and float(balance) < MIN_ACCOUNT_BALANCE:
+            changes["enabled"] = 0
+            if not last_error:
+                changes["last_error"] = LOW_BALANCE_MESSAGE
         sql = "UPDATE accounts SET " + ",".join(f"{key}=?" for key in changes) + " WHERE id=?"
         with self._connect() as db:
             db.execute(sql, (*changes.values(), account_id))
@@ -206,18 +220,47 @@ class Store:
     def reserve_task(self, *, task_id: str, account_id: int, model: str,
                      request: dict[str, Any], normalized: dict[str, Any],
                      estimated_cost: float, balance: float) -> bool:
+        return self.reserve_task_result(
+            task_id=task_id, account_id=account_id, model=model,
+            request=request, normalized=normalized, estimated_cost=estimated_cost,
+            balance=balance,
+        ) == "accepted"
+
+    def account_capacity(self, account_id: int, balance: float) -> dict[str, Any]:
+        with self._connect() as db:
+            account = db.execute("SELECT enabled,max_concurrency FROM accounts WHERE id=?",
+                                 (account_id,)).fetchone()
+            row = db.execute("SELECT COUNT(*) AS active,COALESCE(SUM(reserved_cost),0) AS reserved FROM tasks WHERE account_id=? AND status NOT IN ('succeeded','failed','expired')",
+                             (account_id,)).fetchone()
+        return {"enabled": bool(account and account["enabled"]),
+                "max_concurrency": account["max_concurrency"] if account else 0,
+                "active": row["active"], "reserved": float(row["reserved"]),
+                "available": max(0.0, float(balance) - float(row["reserved"]))}
+
+    def reserve_task_result(self, *, task_id: str, account_id: int, model: str,
+                            request: dict[str, Any], normalized: dict[str, Any],
+                            estimated_cost: float, balance: float) -> str:
         now = time.time()
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            account = db.execute("SELECT enabled,max_concurrency FROM accounts WHERE id=?",
+                                 (account_id,)).fetchone()
+            if not account:
+                return "disabled"
+            if float(balance) < MIN_ACCOUNT_BALANCE:
+                db.execute("UPDATE accounts SET balance=?,enabled=0,last_error=?,updated_at=? WHERE id=?",
+                           (balance, LOW_BALANCE_MESSAGE, now, account_id))
+                return "low_balance"
+            if not account["enabled"]:
+                return "disabled"
             active = db.execute("SELECT COUNT(*) FROM tasks WHERE account_id=? AND status NOT IN ('succeeded','failed','expired')",
                                 (account_id,)).fetchone()[0]
-            limit_row = db.execute("SELECT max_concurrency FROM accounts WHERE id=?", (account_id,)).fetchone()
-            if not limit_row or active >= limit_row[0]:
-                return False
             reserved = db.execute("SELECT COALESCE(SUM(reserved_cost),0) FROM tasks WHERE account_id=? AND status NOT IN ('succeeded','failed','expired')",
                                   (account_id,)).fetchone()[0]
             if float(balance) - float(reserved) < float(estimated_cost):
-                return False
+                return "insufficient"
+            if active >= account["max_concurrency"]:
+                return "busy"
             db.execute("""
                 INSERT INTO tasks(id,account_id,model,status,request_json,normalized_json,
                                   estimated_cost,reserved_cost,balance_before,created_at,updated_at)
@@ -226,7 +269,41 @@ class Store:
                   estimated_cost, estimated_cost, balance, now, now))
             db.execute("UPDATE accounts SET balance=?,updated_at=? WHERE id=?",
                        (balance, now, account_id))
-        return True
+        return "accepted"
+
+    def reassign_task(self, task_id: str, *, from_account_id: int,
+                      to_account_id: int, estimated_cost: float, balance: float) -> str:
+        """Move an unsubmitted task to an account with enough free credit and capacity."""
+        now = time.time()
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            task = db.execute("SELECT account_id,status,upstream_job_id FROM tasks WHERE id=?",
+                              (task_id,)).fetchone()
+            if not task or task["account_id"] != from_account_id or task["upstream_job_id"]:
+                return "invalid"
+            if task["status"] not in {"queued", "preparing"}:
+                return "invalid"
+            account = db.execute("SELECT enabled,max_concurrency FROM accounts WHERE id=?",
+                                 (to_account_id,)).fetchone()
+            if not account or not account["enabled"]:
+                return "disabled"
+            if float(balance) < MIN_ACCOUNT_BALANCE:
+                db.execute("UPDATE accounts SET balance=?,enabled=0,last_error=?,updated_at=? WHERE id=?",
+                           (balance, LOW_BALANCE_MESSAGE, now, to_account_id))
+                return "low_balance"
+            active = db.execute("SELECT COUNT(*) FROM tasks WHERE account_id=? AND status NOT IN ('succeeded','failed','expired')",
+                                (to_account_id,)).fetchone()[0]
+            reserved = db.execute("SELECT COALESCE(SUM(reserved_cost),0) FROM tasks WHERE account_id=? AND status NOT IN ('succeeded','failed','expired')",
+                                  (to_account_id,)).fetchone()[0]
+            if float(balance) - float(reserved) < float(estimated_cost):
+                return "insufficient"
+            if active >= account["max_concurrency"]:
+                return "busy"
+            db.execute("UPDATE tasks SET account_id=?,estimated_cost=?,reserved_cost=?,balance_before=?,status='queued',updated_at=? WHERE id=?",
+                       (to_account_id, estimated_cost, estimated_cost, balance, now, task_id))
+            db.execute("UPDATE accounts SET balance=?,updated_at=? WHERE id=?",
+                       (balance, now, to_account_id))
+        return "accepted"
 
     def adjust_reservation(self, task_id: str, new_cost: float, balance: float) -> bool:
         with self._connect() as db:

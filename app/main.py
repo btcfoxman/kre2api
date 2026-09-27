@@ -19,7 +19,7 @@ from .browser_login import KreaLoginError
 from .client import KreaClient, KreaError
 from .credentials import encrypt_password
 from .service import Service
-from .store import Store
+from .store import MIN_ACCOUNT_BALANCE, Store
 
 
 API_KEY = os.getenv("KR_API_KEY", "")
@@ -81,7 +81,8 @@ def _raise(exc: Exception) -> HTTPException:
     if isinstance(exc, HTTPException):
         return exc
     if isinstance(exc, KreaError):
-        return HTTPException(status_code=exc.status_code, detail=str(exc))
+        return HTTPException(status_code=exc.status_code, detail=str(exc),
+                             headers={"X-KREAPI-Error-Code": exc.code} if exc.code else None)
     if isinstance(exc, KreaLoginError):
         return HTTPException(status_code=409 if exc.status == "challenge_required" else 503,
                              detail=str(exc))
@@ -194,7 +195,8 @@ def _response(task: dict[str, Any]) -> dict[str, Any]:
     return {"id": task["id"], "object": "response", "model": task["model"],
             "status": "completed" if task["status"] == "succeeded" else task["status"],
             "output": [{"type": "video_generation_call", "video_url": item["url"]}
-                       for item in task["data"]], "error": task["error"]}
+                       for item in task["data"]], "error": task["error"],
+            "error_code": task.get("error_code")}
 
 
 @app.get("/v1/responses/{task_id}", dependencies=[Depends(api_auth)])
@@ -217,12 +219,28 @@ def quote(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
             try:
                 client = service._client(account)
                 balance = client.balance()
-                cost = client.estimate(normalized, video_seconds=video_seconds)
                 store.set_account(account["id"], balance=balance,
                                   cookies=client.export_cookies(), last_error="")
+                if balance < MIN_ACCOUNT_BALANCE:
+                    output.append({"account_id": account["id"], "name": account["name"],
+                                   "balance": balance, "estimated_cost": None,
+                                   "eligible": False,
+                                   "reason": "balance_below_150"})
+                    continue
+                cost = client.estimate(normalized, video_seconds=video_seconds)
+                capacity = store.account_capacity(account["id"], balance)
+                eligible = (capacity["enabled"] and capacity["available"] >= cost
+                            and capacity["active"] < capacity["max_concurrency"])
+                reason = ("insufficient_credits" if capacity["available"] < cost else
+                          "busy" if capacity["active"] >= capacity["max_concurrency"] else
+                          "disabled" if not capacity["enabled"] else "")
                 output.append({"account_id": account["id"], "name": account["name"],
                                "balance": balance, "estimated_cost": cost,
-                               "available_after": balance - cost, "eligible": balance >= cost})
+                               "reserved_cost": capacity["reserved"],
+                               "available_balance": capacity["available"],
+                               "available_after": capacity["available"] - cost,
+                               "active_tasks": capacity["active"],
+                               "eligible": eligible, "reason": reason})
             except Exception as exc:
                 output.append({"account_id": account["id"], "name": account["name"],
                                "error": str(exc)[:300], "eligible": False})

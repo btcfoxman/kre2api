@@ -70,3 +70,9 @@ def test_unbound_media_reference_is_rejected_before_upstream_submission():
     with pytest.raises(ValueError, match="Video reference 2"):
         normalize_request({"model": "sd-2-0-mini", "prompt": "video2 moves left",
                            "video_urls": ["https://example.test/one.mp4"]})
+
+
+def test_zero_reference_number_is_plain_prompt_text():
+    request = normalize_request({"model": "sd-2-0-fast", "prompt": "video0 starts the scene"})
+    assert request["prompt"] == "video0 starts the scene"
+    assert request["videos"] == []

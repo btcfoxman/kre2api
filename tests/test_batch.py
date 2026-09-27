@@ -38,4 +38,5 @@ def test_password_is_encrypted_and_login_updates_session(tmp_path, monkeypatch):
     assert updated["login_status"] == "ready"
     assert updated["project_id"] == "project-one"
     assert updated["balance"] == 99.0
+    assert updated["enabled"] is False
     service.stop()

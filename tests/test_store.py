@@ -46,7 +46,7 @@ def test_account_concurrency_defaults_to_one_and_can_be_raised(tmp_path):
     normalized = {"model": "sd-2-0", "duration": 5, "resolution": "720p",
                   "images": [], "videos": [], "audios": []}
     args = {"account_id": account["id"], "model": "sd-2-0", "request": {},
-            "normalized": normalized, "estimated_cost": 10, "balance": 100}
+            "normalized": normalized, "estimated_cost": 10, "balance": 1000}
     assert store.reserve_task(task_id="one", **args)
     assert not store.reserve_task(task_id="two", **args)
     store.set_account(account["id"], max_concurrency=2)
@@ -54,6 +54,30 @@ def test_account_concurrency_defaults_to_one_and_can_be_raised(tmp_path):
     assert not store.reserve_task(task_id="three", **args)
     assert store.task_overlapped(store.task("one"))
     assert store.task_overlapped(store.task("two"))
+
+
+def test_capacity_deducts_inflight_reservations(tmp_path):
+    store = Store(str(tmp_path / "capacity.db"))
+    item = store.upsert_account(name="capacity", cookies=[{"name": "session", "value": "secret"}],
+                                project_id="project")
+    assert store.reserve_task(task_id="pending", account_id=item["id"], model="sd-2-0",
+                              request={}, normalized={}, estimated_cost=200, balance=500)
+    capacity = store.account_capacity(item["id"], 500)
+    assert capacity["available"] == 300
+    assert capacity["reserved"] == 200
+    assert capacity["active"] == capacity["max_concurrency"] == 1
+
+
+def test_existing_low_balance_account_is_disabled_on_store_start(tmp_path):
+    path = tmp_path / "low.db"
+    store = Store(str(path))
+    item = store.upsert_account(name="old", cookies=[{"name": "session", "value": "secret"}],
+                                project_id="project")
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE accounts SET enabled=1,balance=149 WHERE id=?", (item["id"],))
+    migrated = Store(str(path)).account(item["id"])
+    assert migrated["enabled"] is False
+    assert migrated["last_error"] == "积分低于 150，账号已自动禁用"
 
 
 def test_existing_cookie_account_migrates_as_ready(tmp_path):

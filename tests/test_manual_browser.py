@@ -54,6 +54,7 @@ def test_manual_login_preserves_account_identity_and_session(tmp_path, monkeypat
             "action_result": {"phase": "signed_in"}}
         saved = service.complete_manual_browser(account["id"])
         assert (saved["login_status"], saved["balance"]) == ("ready", 28.5)
+        assert saved["enabled"] is False
         assert uuid.UUID(saved["project_id"]).version == 7
         assert saved["cookies"][0]["value"] == "private"
         assert opened[0].closed

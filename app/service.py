@@ -18,11 +18,12 @@ from .client import KreaClient, KreaError, TERMINAL_STATUSES
 from .browser_login import KreaLoginError, login as browser_login, new_project_id
 from .credentials import decrypt_password
 from .manual_browser import ManualBrowser
-from .store import Store
+from .store import MIN_ACCOUNT_BALANCE, Store
 
 
 LOG = logging.getLogger("kre2api.service")
 FINAL = {"succeeded", "failed", "expired"}
+INSUFFICIENT_CREDITS_MESSAGE = "可用账号积分不足，无法执行本次任务"
 
 
 def result_urls(job: dict[str, Any]) -> list[str]:
@@ -236,35 +237,53 @@ class Service:
 
     def create(self, request: dict[str, Any]) -> dict[str, Any]:
         normalized = normalize_request(request)
-        accounts = [account for account in self.store.accounts(enabled_only=True)
-                    if account.get("project_id") and account.get("cookies")
-                    and account.get("login_status") == "ready"]
+        ready_accounts = [account for account in self.store.accounts()
+                          if account.get("project_id") and account.get("cookies")
+                          and account.get("login_status") == "ready"]
         if requested_account := request.get("account_id"):
-            accounts = [account for account in accounts if account["id"] == int(requested_account)]
+            ready_accounts = [account for account in ready_accounts
+                              if account["id"] == int(requested_account)]
+        accounts = [account for account in ready_accounts if account["enabled"]]
         if not accounts:
+            if ready_accounts and all(account["balance"] is not None
+                                      and account["balance"] < MIN_ACCOUNT_BALANCE
+                                      for account in ready_accounts):
+                raise KreaError(INSUFFICIENT_CREDITS_MESSAGE, 402,
+                                code="INSUFFICIENT_CREDITS")
             raise KreaError("no enabled Krea account with a project is configured", 503)
-        candidate_errors: list[str] = []
+        outcomes: list[str] = []
         task_id = "kre_" + uuid.uuid4().hex[:16]
         video_seconds = sum(float(item.get("duration") or 0) for item in normalized["videos"])
         for account in sorted(accounts, key=lambda item: -(item.get("balance") or 0)):
             try:
                 client = self._client(account)
                 balance = client.balance()
-                quote = client.estimate(normalized, video_seconds=video_seconds)
-                cost = self._learned_estimate(normalized, quote, video_seconds)
                 self.store.set_account(account["id"], balance=balance,
                                        cookies=client.export_cookies(), last_error="")
-                if self.store.reserve_task(task_id=task_id, account_id=account["id"],
-                                           model=normalized["model"], request=request,
-                                           normalized=normalized, estimated_cost=cost,
-                                           balance=balance):
+                if balance < MIN_ACCOUNT_BALANCE:
+                    outcomes.append("insufficient")
+                    continue
+                quote = client.estimate(normalized, video_seconds=video_seconds)
+                cost = self._learned_estimate(normalized, quote, video_seconds)
+                result = self.store.reserve_task_result(
+                    task_id=task_id, account_id=account["id"], model=normalized["model"],
+                    request=request, normalized=normalized, estimated_cost=cost,
+                    balance=balance,
+                )
+                if result == "accepted":
                     self._enqueue(task_id)
                     return self.public_task(self.store.task(task_id))
-                candidate_errors.append(f"{account['name']}: insufficient available compute units or busy")
+                outcomes.append("insufficient" if result in {"insufficient", "low_balance"}
+                                else result)
             except KreaError as exc:
                 self.store.set_account(account["id"], last_error=str(exc))
-                candidate_errors.append(f"{account['name']}: {exc}")
-        raise KreaError("; ".join(candidate_errors)[:1000] or "no Krea account available", 503)
+                outcomes.append("insufficient" if exc.status_code == 402 else "unavailable")
+        if outcomes and all(result == "insufficient" for result in outcomes):
+            raise KreaError(INSUFFICIENT_CREDITS_MESSAGE, 402,
+                            code="INSUFFICIENT_CREDITS")
+        if outcomes and all(result == "busy" for result in outcomes):
+            raise KreaError("所有账号并发已满，请稍后重试", 503, code="TASK_QUEUE_FULL")
+        raise KreaError("暂无可用 Krea 账号，请稍后重试", 503, code="NO_AVAILABLE_ACCOUNT")
 
     def _enqueue(self, task_id: str) -> None:
         with self.lock:
@@ -275,45 +294,99 @@ class Service:
         future.add_done_callback(lambda _: self.inflight.discard(task_id))
 
     def _process(self, task_id: str) -> None:
-        task = self.store.task(task_id)
-        if not task or task["status"] in FINAL:
-            return
-        account = self.store.account(task["account_id"])
-        if not account:
-            self.store.update_task(task_id, status="failed", reserved_cost=0,
-                                   error="assigned account no longer exists")
-            return
-        client = self._client(account)
-        try:
-            self.store.update_task(task_id, status="preparing")
-            normalized, video_seconds = client.prepare_media(task["normalized"])
-            quote = client.estimate(normalized, video_seconds=video_seconds)
-            balance = client.balance()
-            cost = self._learned_estimate(normalized, quote, video_seconds)
-            if not self.store.adjust_reservation(task_id, cost, balance):
-                raise KreaError("account compute units became insufficient after media upload", 402)
-            self.store.update_task(task_id, normalized_json=json.dumps(normalized, ensure_ascii=False))
-            upstream_request = {"method": "POST", "path": "/api/jobs/v2/new/videoV2",
-                                "payload": client.generation_input(normalized, account["project_id"])}
-            self.store.update_task(task_id, upstream_request_json=json.dumps(upstream_request, ensure_ascii=False))
-            self.store.update_task(task_id, status="submitting")
-            jobs = client.submit(normalized, account["project_id"])
-            upstream_id = str(jobs[0]["job_id"])
-            self.store.update_task(task_id, upstream_job_id=upstream_id,
-                                   upstream_response_json=json.dumps({"submission": jobs}, ensure_ascii=False),
-                                   status="running", error="")
-            self.store.set_account(account["id"], cookies=client.export_cookies(),
-                                   last_error="")
-        except Exception as exc:
-            message = str(exc)[:600]
-            public_message = ("素材下载失败，请检查素材链接后重试~"
-                              if isinstance(exc, KreaError) and exc.code == "MEDIA_DOWNLOAD_FAILED"
-                              else message)
-            self.store.update_task(task_id, status="failed", reserved_cost=0,
-                                   error=public_message)
-            self.store.set_account(account["id"], last_error=message,
-                                   cookies=client.export_cookies())
-            LOG.warning("task %s failed before upstream acceptance: %s", task_id, message)
+        tried_accounts: set[int] = set()
+        while True:
+            task = self.store.task(task_id)
+            if not task or task["status"] in FINAL:
+                return
+            account = self.store.account(task["account_id"])
+            if not account:
+                self.store.update_task(task_id, status="failed", reserved_cost=0,
+                                       error="assigned account no longer exists")
+                return
+            tried_accounts.add(account["id"])
+            client = self._client(account)
+            try:
+                self.store.update_task(task_id, status="preparing")
+                normalized, video_seconds = client.prepare_media(task["normalized"])
+                quote = client.estimate(normalized, video_seconds=video_seconds)
+                balance = client.balance()
+                cost = self._learned_estimate(normalized, quote, video_seconds)
+                self.store.set_account(account["id"], balance=balance,
+                                       cookies=client.export_cookies(), last_error="")
+                if (balance < MIN_ACCOUNT_BALANCE
+                        or not self.store.adjust_reservation(task_id, cost, balance)):
+                    if self._reassign_after_insufficient(task, account["id"], cost,
+                                                         tried_accounts):
+                        continue
+                    raise KreaError(INSUFFICIENT_CREDITS_MESSAGE, 402,
+                                    code="INSUFFICIENT_CREDITS")
+                self.store.update_task(task_id, normalized_json=json.dumps(normalized, ensure_ascii=False))
+                upstream_request = {"method": "POST", "path": "/api/jobs/v2/new/videoV2",
+                                    "payload": client.generation_input(normalized, account["project_id"])}
+                self.store.update_task(task_id, upstream_request_json=json.dumps(upstream_request, ensure_ascii=False))
+                self.store.update_task(task_id, status="submitting")
+                jobs = client.submit(normalized, account["project_id"])
+                upstream_id = str(jobs[0]["job_id"])
+                self.store.update_task(task_id, upstream_job_id=upstream_id,
+                                       upstream_response_json=json.dumps({"submission": jobs}, ensure_ascii=False),
+                                       status="running", error="")
+                self.store.set_account(account["id"], cookies=client.export_cookies(),
+                                       last_error="")
+                return
+            except Exception as exc:
+                current_task = self.store.task(task_id)
+                if (isinstance(exc, KreaError) and exc.status_code == 402
+                        and current_task and current_task["status"] in {"queued", "preparing"}):
+                    try:
+                        self.store.set_account(account["id"], balance=client.balance(),
+                                               cookies=client.export_cookies())
+                    except KreaError:
+                        pass
+                    if self._reassign_after_insufficient(task, account["id"],
+                                                         task["estimated_cost"], tried_accounts):
+                        continue
+                    exc = KreaError(INSUFFICIENT_CREDITS_MESSAGE, 402,
+                                    code="INSUFFICIENT_CREDITS")
+                message = str(exc)[:600]
+                public_message = ("素材下载失败，请检查素材链接后重试~"
+                                  if isinstance(exc, KreaError) and exc.code == "MEDIA_DOWNLOAD_FAILED"
+                                  else message)
+                self.store.update_task(task_id, status="failed", reserved_cost=0,
+                                       error=public_message)
+                current_account = self.store.account(account["id"])
+                self.store.set_account(
+                    account["id"],
+                    last_error=(None if current_account and current_account["balance"] is not None
+                                and current_account["balance"] < MIN_ACCOUNT_BALANCE else message),
+                    cookies=client.export_cookies(),
+                )
+                LOG.warning("task %s failed before upstream acceptance: %s", task_id, message)
+                return
+
+    def _reassign_after_insufficient(self, task: dict[str, Any], current_account_id: int,
+                                     cost: float, tried_accounts: set[int]) -> bool:
+        if task["request"].get("account_id"):
+            return False
+        accounts = [account for account in self.store.accounts(enabled_only=True)
+                    if account["id"] not in tried_accounts and account["project_id"]
+                    and account["cookies"] and account["login_status"] == "ready"]
+        for account in sorted(accounts, key=lambda item: -(item.get("balance") or 0)):
+            tried_accounts.add(account["id"])
+            try:
+                client = self._client(account)
+                balance = client.balance()
+                self.store.set_account(account["id"], balance=balance,
+                                       cookies=client.export_cookies(), last_error="")
+                if balance < MIN_ACCOUNT_BALANCE:
+                    continue
+                if self.store.reassign_task(task["id"], from_account_id=current_account_id,
+                                            to_account_id=account["id"],
+                                            estimated_cost=cost, balance=balance) == "accepted":
+                    return True
+            except KreaError as exc:
+                self.store.set_account(account["id"], last_error=str(exc))
+        return False
 
     def _poll_loop(self) -> None:
         while not self.stop_event.wait(self.poll_seconds):
@@ -388,4 +461,6 @@ class Service:
             "actual_cost": task["actual_cost"],
             "data": [{"url": url} for url in task["result_urls"]],
             "error": task["error"] or None,
+            "error_code": ("INSUFFICIENT_CREDITS" if task["error"] == INSUFFICIENT_CREDITS_MESSAGE
+                           else None),
         }

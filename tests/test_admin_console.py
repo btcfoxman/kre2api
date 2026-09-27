@@ -42,7 +42,7 @@ def test_admin_settings_account_and_task_detail(tmp_path, monkeypatch):
                       "images": [], "videos": [], "audios": []}
         assert main.store.reserve_task(task_id="kre_detail", account_id=account["id"],
                                        model="sd-2-0", request={"prompt": "test"},
-                                       normalized=normalized, estimated_cost=10, balance=100)
+                                       normalized=normalized, estimated_cost=10, balance=1000)
         main.store.update_task("kre_detail",
                                upstream_request_json=json.dumps({"method": "POST", "payload": {"prompt": "test"}}),
                                upstream_response_json=json.dumps({"submission": [{"job_id": "krea-job"}]}))
@@ -92,5 +92,15 @@ def test_rejected_submission_marks_that_no_task_was_accepted(monkeypatch):
                                    json={"prompt": "test"})
             assert response.status_code == 500
             assert "X-KREAPI-Submit-Outcome" not in response.headers
+        with monkeypatch.context() as scoped:
+            scoped.setattr(main.service, "create", lambda _body:
+                           (_ for _ in ()).throw(KreaError("可用账号积分不足，无法执行本次任务",
+                                                     402, code="INSUFFICIENT_CREDITS")))
+            response = client.post("/v1/videos", headers={"Authorization": "Bearer test-api-key"},
+                                   json={"prompt": "test"})
+            assert response.status_code == 402
+            assert response.json()["detail"] == "可用账号积分不足，无法执行本次任务"
+            assert response.headers["X-KREAPI-Error-Code"] == "INSUFFICIENT_CREDITS"
+            assert response.headers["X-KREAPI-Submit-Outcome"] == "not-accepted"
     finally:
         client.close()
