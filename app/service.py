@@ -157,10 +157,14 @@ class Service:
             if not self.store.adjust_reservation(task_id, cost, balance):
                 raise KreaError("account compute units became insufficient after media upload", 402)
             self.store.update_task(task_id, normalized_json=json.dumps(normalized, ensure_ascii=False))
+            upstream_request = {"method": "POST", "path": "/api/jobs/v2/new/videoV2",
+                                "payload": client.generation_input(normalized, account["project_id"])}
+            self.store.update_task(task_id, upstream_request_json=json.dumps(upstream_request, ensure_ascii=False))
             self.store.update_task(task_id, status="submitting")
             jobs = client.submit(normalized, account["project_id"])
             upstream_id = str(jobs[0]["job_id"])
             self.store.update_task(task_id, upstream_job_id=upstream_id,
+                                   upstream_response_json=json.dumps({"submission": jobs}, ensure_ascii=False),
                                    status="running", error="")
             self.store.set_account(account["id"], cookies=client.export_cookies(),
                                    last_error="")
@@ -192,6 +196,9 @@ class Service:
             return
         client = self._client(account)
         job = client.job(task["upstream_job_id"])
+        self.store.update_task(task["id"], upstream_response_json=json.dumps({
+            **task.get("upstream_response", {}), "latest_status": job,
+        }, ensure_ascii=False))
         status = str(job.get("status") or "")
         if status not in TERMINAL_STATUSES:
             self.store.update_task(task["id"], status="running")

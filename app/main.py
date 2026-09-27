@@ -289,7 +289,9 @@ def admin_tasks(limit: int = 100) -> list[dict[str, Any]]:
 def admin_task_detail(task_id: str) -> dict[str, Any]:
     task = _task(task_id)
     return {**service.public_task(task), "request": task["request"],
-            "normalized": task["normalized"], "upstream_job_id": task["upstream_job_id"],
+            "normalized": task["normalized"], "upstream_request": task["upstream_request"],
+            "upstream_response": task["upstream_response"],
+            "upstream_job_id": task["upstream_job_id"],
             "balance_before": task["balance_before"], "balance_after": task["balance_after"],
             "created_at": task["created_at"], "updated_at": task["updated_at"],
             "caller_response": service.public_task(task)}

@@ -123,7 +123,7 @@ function docs() {
 }
 function detailTab(key) {
   const item = state.detail;
-  const data = key === "upstream" ? {job_id: item.upstream_job_id, status: item.status, error: item.error, balance_before: item.balance_before, balance_after: item.balance_after} : item[key];
+  const data = item[key];
   $("#auditCode").textContent = JSON.stringify(data ?? {}, null, 2);
   document.querySelectorAll("#auditTabs button").forEach((button) => button.classList.toggle("active", button.dataset.key === key));
 }
@@ -134,7 +134,7 @@ async function openDetail(id) {
     const facts = [["状态", item.status],["模型", item.model],["账号", state.accounts.find((entry) => entry.id === item.account_id)?.name || item.account_id],["时长 / 格式", item.duration + "s · " + item.resolution + " · " + item.aspect_ratio],["预估 / 实际", num(item.estimated_cost) + " / " + num(item.actual_cost)],["创建时间", stamp(item.created_at)]];
     $("#detailFacts").innerHTML = facts.map(([label, value]) => '<div><span>' + esc(label) + '</span><b title="' + esc(value) + '">' + esc(value) + '</b></div>').join("");
     $("#detailPrompt").textContent = item.request?.prompt || "—";
-    $("#detailMeta").textContent = item.error || "";
+    $("#detailMeta").textContent = item.error || (item.upstream_job_id ? "Krea Job " + item.upstream_job_id : "");
     const media = ["image_urls","video_urls","audio_urls"].flatMap((key) => {
       const source = item.request?.[key];
       const entries = Array.isArray(source) ? source : source ? [source] : [];

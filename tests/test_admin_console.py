@@ -1,4 +1,5 @@
 import importlib
+import json
 
 from fastapi.testclient import TestClient
 
@@ -40,10 +41,15 @@ def test_admin_settings_account_and_task_detail(tmp_path, monkeypatch):
         assert main.store.reserve_task(task_id="kre_detail", account_id=account["id"],
                                        model="sd-2-0", request={"prompt": "test"},
                                        normalized=normalized, estimated_cost=10, balance=100)
+        main.store.update_task("kre_detail",
+                               upstream_request_json=json.dumps({"method": "POST", "payload": {"prompt": "test"}}),
+                               upstream_response_json=json.dumps({"submission": [{"job_id": "krea-job"}]}))
         detail = client.get("/api/admin/tasks/kre_detail").json()
         assert detail["request"]["prompt"] == "test"
         assert detail["normalized"]["provider"] == "seedance-2"
         assert detail["caller_response"]["id"] == "kre_detail"
+        assert detail["upstream_request"]["method"] == "POST"
+        assert detail["upstream_response"]["submission"][0]["job_id"] == "krea-job"
         main.store.update_task("kre_detail", status="failed", reserved_cost=0, error="upstream error")
         assert client.delete("/api/admin/tasks/finished").json() == {"deleted": 1}
         assert client.get("/api/admin/tasks/kre_detail").status_code == 404

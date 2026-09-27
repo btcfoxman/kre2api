@@ -57,6 +57,8 @@ class Store:
                     balance_before REAL,
                     balance_after REAL,
                     result_json TEXT NOT NULL DEFAULT '[]',
+                    upstream_request_json TEXT NOT NULL DEFAULT '{}',
+                    upstream_response_json TEXT NOT NULL DEFAULT '{}',
                     error TEXT NOT NULL DEFAULT '',
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
@@ -84,6 +86,10 @@ class Store:
                     value TEXT NOT NULL
                 );
             """)
+            task_columns = {row["name"] for row in db.execute("PRAGMA table_info(tasks)")}
+            for column in ("upstream_request_json", "upstream_response_json"):
+                if column not in task_columns:
+                    db.execute(f"ALTER TABLE tasks ADD COLUMN {column} TEXT NOT NULL DEFAULT '{{}}'")
 
     @staticmethod
     def _account(row: sqlite3.Row) -> dict[str, Any]:
@@ -98,6 +104,8 @@ class Store:
         result["request"] = json.loads(result.pop("request_json"))
         result["normalized"] = json.loads(result.pop("normalized_json"))
         result["result_urls"] = json.loads(result.pop("result_json"))
+        result["upstream_request"] = json.loads(result.pop("upstream_request_json"))
+        result["upstream_response"] = json.loads(result.pop("upstream_response_json"))
         return result
 
     def upsert_account(self, *, name: str, cookies: list[dict[str, Any]],
@@ -206,7 +214,8 @@ class Store:
 
     def update_task(self, task_id: str, **fields: Any) -> None:
         allowed = {"status", "upstream_job_id", "estimated_cost", "reserved_cost",
-                   "actual_cost", "balance_after", "result_json", "error", "normalized_json"}
+                   "actual_cost", "balance_after", "result_json", "error", "normalized_json",
+                   "upstream_request_json", "upstream_response_json"}
         if unknown := set(fields) - allowed:
             raise ValueError(f"unknown task fields: {unknown}")
         fields["updated_at"] = time.time()
