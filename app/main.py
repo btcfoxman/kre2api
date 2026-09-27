@@ -31,7 +31,7 @@ if not API_KEY or not ADMIN_TOKEN:
 DATA_DIR = Path(os.getenv("KR_DATA_DIR", "/app/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 store = Store(os.getenv("KR_DATABASE_PATH", str(DATA_DIR / "kre2api.db")))
-service = Service(store, workers=int(os.getenv("KR_TASK_WORKERS", "4")),
+service = Service(store, workers=int(os.getenv("KR_TASK_WORKERS", "10")),
                   poll_seconds=int(os.getenv("KR_POLL_INTERVAL_SECONDS", "10")),
                   timeout_seconds=int(os.getenv("KR_TASK_TIMEOUT_SECONDS", "3600")))
 STATIC = Path(__file__).parent / "static"
