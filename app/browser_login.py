@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import time
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -34,6 +35,27 @@ def _targets(port: int) -> list[dict]:
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open(f"http://127.0.0.1:{port}/json/list", timeout=2) as response:
         return json.load(response)
+
+
+@contextmanager
+def _profile_guard(profile: Path):
+    """Serialize profile use even when two service containers share the data volume."""
+    with (profile / ".kre-login.lock").open("a+b") as lock:
+        if os.name == "posix":
+            import fcntl
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        yield
+
+
+def _remove_stale_singletons(profile: Path) -> None:
+    """Chromium leaves these links after an abrupt container shutdown."""
+    socket = profile / "SingletonSocket"
+    if socket.exists():
+        return
+    for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+        entry = profile / name
+        if entry.is_symlink():
+            entry.unlink()
 
 
 def _account_email(cookies: list[dict]) -> str:
@@ -230,20 +252,22 @@ def login(account_id: int, email: str, password: str, proxy_url: str,
     if proxy:
         command.append(f"--proxy-server={proxy}")
     command.append("https://www.krea.ai/video")
-    process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                               start_new_session=True)
-    try:
-        return asyncio.run(_login_cdp(port, email, password, timeout))
-    except KreaLoginError:
-        raise
-    except Exception as exc:
-        raise KreaLoginError(f"Krea native browser login failed: {type(exc).__name__}",
-                             "network_error") from exc
-    finally:
-        process.terminate()
+    with _profile_guard(profile):
+        _remove_stale_singletons(profile)
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   start_new_session=True)
         try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
+            return asyncio.run(_login_cdp(port, email, password, timeout))
+        except KreaLoginError:
+            raise
+        except Exception as exc:
+            raise KreaLoginError(f"Krea native browser login failed: {type(exc).__name__}",
+                                 "network_error") from exc
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
