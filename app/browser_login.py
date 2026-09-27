@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 
 class KreaLoginError(Exception):
@@ -85,6 +85,7 @@ def login(account_id: int, email: str, password: str, proxy_url: str,
             try:
                 page = context.pages[0] if context.pages else context.new_page()
                 page.goto("https://www.krea.ai/video", wait_until="domcontentloaded", timeout=45000)
+                page.wait_for_timeout(2500)
                 state = _billing(page)
                 if state is None:
                     deadline = time.monotonic() + timeout
@@ -95,15 +96,19 @@ def login(account_id: int, email: str, password: str, proxy_url: str,
                         if email_input.count() and email_input.is_visible() and not submitted:
                             email_input.fill(email)
                             if not (password_input.count() and password_input.is_visible()):
-                                page.get_by_role("button", name=re.compile(r"continue|next|email|继续|下一步", re.I)).first.click(timeout=5000)
+                                try:
+                                    page.get_by_role("dialog").get_by_role(
+                                        "button", name="Continue", exact=True).click(timeout=10000)
+                                except PlaywrightTimeoutError as exc:
+                                    raise KreaLoginError("Krea email step needs browser verification", "challenge_required") from exc
                             submitted = False
                         if password_input.count() and password_input.is_visible() and not submitted:
                             password_input.fill(password)
-                            submit = page.get_by_role("button", name=re.compile(r"log in|sign in|登录|continue", re.I))
-                            if submit.count():
-                                submit.last.click(timeout=5000)
-                            else:
-                                password_input.press("Enter")
+                            try:
+                                page.get_by_role("dialog").get_by_role(
+                                    "button", name="Continue", exact=True).click(timeout=15000)
+                            except PlaywrightTimeoutError as exc:
+                                raise KreaLoginError("Krea password step needs browser verification", "challenge_required") from exc
                             submitted = True
                         elif not email_input.count() and not password_input.count():
                             _click_login(page)
