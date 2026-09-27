@@ -140,9 +140,24 @@ class _CDP:
               (x.src.includes('challenges.cloudflare.com') ||
                x.title.toLowerCase().includes('challenge'));
           });
-          if (!frame) return null;
-          const r = frame.getBoundingClientRect();
-          return {x:r.x+Math.min(30,r.width/3), y:r.y+r.height/2};
+          if (frame) {
+            const r = frame.getBoundingClientRect();
+            return {x:r.x+Math.min(30,r.width/3), y:r.y+r.height/2};
+          }
+          const widget = [...document.querySelectorAll('.cf-turnstile,[data-sitekey]')]
+            .find(x => x.getBoundingClientRect().width > 150);
+          if (widget) {
+            const r = widget.getBoundingClientRect();
+            return {x:r.x+Math.min(20,r.width/6), y:r.y+r.height/2};
+          }
+          // Krea's visible Turnstile can live in a closed shadow root. In the
+          // password dialog it sits immediately above the disabled Continue button.
+          const button = [...document.querySelectorAll('[role=dialog] button')]
+            .find(x => x.innerText.trim() === 'Continue' && x.disabled &&
+              x.getBoundingClientRect().width > 150);
+          if (!button) return null;
+          const r = button.getBoundingClientRect();
+          return {x:r.x+Math.min(60,r.width/4), y:r.y-62};
         })()""")
         if not isinstance(position, dict):
             return False
@@ -169,7 +184,9 @@ async def _login_cdp(port: int, email: str, password: str, timeout: int
     async with websockets.connect(page["webSocketDebuggerUrl"], origin=None,
                                   proxy=None, open_timeout=10) as socket:
         cdp = _CDP(socket)
-        email_filled = email_submitted = password_filled = submitted = challenge_clicked = False
+        email_filled = email_submitted = password_filled = submitted = False
+        challenge_clicks = 0
+        next_challenge_click = 0.0
         await asyncio.sleep(1)
         while time.monotonic() < deadline:
             state = await cdp.evaluate("""(async () => {
@@ -226,8 +243,11 @@ async def _login_cdp(port: int, email: str, password: str, timeout: int
                 email_submitted = await cdp.click("[role=dialog] button", "Continue")
             elif not form["email"] and not form["password"]:
                 await cdp.click("button", "Sign in")
-            elif password_filled and not form["continueEnabled"] and not challenge_clicked:
-                challenge_clicked = await cdp.challenge_click()
+            elif (password_filled and not form["continueEnabled"] and challenge_clicks < 3
+                  and time.monotonic() >= next_challenge_click):
+                if await cdp.challenge_click():
+                    challenge_clicks += 1
+                    next_challenge_click = time.monotonic() + 8
             await asyncio.sleep(1.5)
         raise KreaLoginError("Krea login requires browser verification or timed out",
                              "challenge_required")
