@@ -50,9 +50,11 @@ class Service:
     def __init__(self, store: Store, *, workers: int = 4,
                  poll_seconds: int = 10, timeout_seconds: int = 3600) -> None:
         self.store = store
-        self.poll_seconds = max(2, poll_seconds)
-        self.timeout_seconds = max(60, timeout_seconds)
-        self.executor = ThreadPoolExecutor(max_workers=max(1, workers),
+        saved = store.settings()
+        self.poll_seconds = int(saved.get("poll_interval_seconds", max(2, poll_seconds)))
+        self.timeout_seconds = int(saved.get("task_timeout_seconds", max(60, timeout_seconds)))
+        self.workers = max(1, workers)
+        self.executor = ThreadPoolExecutor(max_workers=self.workers,
                                            thread_name_prefix="kre2api")
         self.stop_event = threading.Event()
         self.poll_thread: threading.Thread | None = None

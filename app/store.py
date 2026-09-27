@@ -79,6 +79,10 @@ class Store:
                     observed_at REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS cost_samples_model ON cost_samples(model, duration, resolution);
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
             """)
 
     @staticmethod
@@ -229,3 +233,20 @@ class Store:
             rows = db.execute("SELECT * FROM cost_samples ORDER BY observed_at DESC LIMIT ?",
                               (limit,)).fetchall()
         return [dict(row) for row in rows]
+
+    def settings(self) -> dict[str, Any]:
+        with self._connect() as db:
+            rows = db.execute("SELECT key,value FROM settings").fetchall()
+        return {row["key"]: json.loads(row["value"]) for row in rows}
+
+    def set_settings(self, values: dict[str, Any]) -> None:
+        with self._connect() as db:
+            db.executemany(
+                "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [(key, _json(value)) for key, value in values.items()],
+            )
+
+    def clear_finished_tasks(self) -> int:
+        with self._connect() as db:
+            result = db.execute("DELETE FROM tasks WHERE status IN ('succeeded','failed','expired')")
+        return result.rowcount

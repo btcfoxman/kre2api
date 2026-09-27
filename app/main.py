@@ -240,10 +240,12 @@ def admin_models() -> list[dict[str, Any]]:
 @app.post("/api/accounts/sync/browser", dependencies=[Depends(sync_auth)])
 def upsert_account(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     try:
+        existing = next((item for item in store.accounts()
+                         if item["name"] == str(body.get("name") or "").strip()), None)
         account = store.upsert_account(name=str(body.get("name") or ""),
-                                       cookies=body.get("cookies") or [],
+                                       cookies=body.get("cookies") or (existing["cookies"] if existing else []),
                                        proxy_url=str(body.get("proxy_url") or ""),
-                                       user_agent=str(body.get("user_agent") or ""),
+                                       user_agent=str(body.get("user_agent") or (existing["user_agent"] if existing else "")),
                                        project_id=str(body.get("project_id") or ""),
                                        enabled=bool(body.get("enabled", True)))
         return _public_account(account)
@@ -281,6 +283,44 @@ def refresh_account(account_id: int) -> dict[str, Any]:
 @app.get("/api/admin/tasks", dependencies=[Depends(admin_auth)])
 def admin_tasks(limit: int = 100) -> list[dict[str, Any]]:
     return [service.public_task(item) for item in store.tasks(min(max(limit, 1), 500))]
+
+
+@app.get("/api/admin/tasks/{task_id}", dependencies=[Depends(admin_auth)])
+def admin_task_detail(task_id: str) -> dict[str, Any]:
+    task = _task(task_id)
+    return {**service.public_task(task), "request": task["request"],
+            "normalized": task["normalized"], "upstream_job_id": task["upstream_job_id"],
+            "balance_before": task["balance_before"], "balance_after": task["balance_after"],
+            "created_at": task["created_at"], "updated_at": task["updated_at"],
+            "caller_response": service.public_task(task)}
+
+
+@app.delete("/api/admin/tasks/finished", dependencies=[Depends(admin_auth)])
+def clear_finished_tasks() -> dict[str, int]:
+    return {"deleted": store.clear_finished_tasks()}
+
+
+@app.get("/api/admin/settings", dependencies=[Depends(admin_auth)])
+def admin_settings() -> dict[str, int]:
+    return {"poll_interval_seconds": service.poll_seconds,
+            "task_timeout_seconds": service.timeout_seconds,
+            "task_workers": service.workers}
+
+
+@app.patch("/api/admin/settings", dependencies=[Depends(admin_auth)])
+def patch_settings(body: dict[str, Any] = Body(...)) -> dict[str, int]:
+    limits = {"poll_interval_seconds": (2, 120), "task_timeout_seconds": (60, 7200)}
+    if not body or set(body) - set(limits):
+        raise HTTPException(status_code=422, detail="unsupported settings")
+    values: dict[str, int] = {}
+    for key, value in body.items():
+        if isinstance(value, bool) or not isinstance(value, int) or not limits[key][0] <= value <= limits[key][1]:
+            raise HTTPException(status_code=422, detail=f"invalid {key}")
+        values[key] = value
+    store.set_settings(values)
+    service.poll_seconds = values.get("poll_interval_seconds", service.poll_seconds)
+    service.timeout_seconds = values.get("task_timeout_seconds", service.timeout_seconds)
+    return admin_settings()
 
 
 @app.get("/api/admin/model-costs", dependencies=[Depends(admin_auth)])

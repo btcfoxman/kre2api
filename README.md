@@ -39,6 +39,8 @@ GET /v1/videos/{task_id}/content
 
 `POST /api/quote` 接收同样的请求参数，但只向 Krea 询价，不创建视频。返回各账号余额、预估消耗和可用性。管理页位于 `/`，使用 `KR_ADMIN_TOKEN` 登录，可查看账号、任务、实际扣费样本，也可用弹窗询价和提交任务。一次仅向同一账号分派一个任务，避免预留积分与余额差相互干扰。
 
+管理页布局与 ak2api 控制台一致，提供账号启停和更新、任务详情（调用者请求、归一化请求、上游任务及调用者响应）、测试提交、实时询价、历史消耗、运行设置和接入文档。运行设置通过 `GET/PATCH /api/admin/settings` 持久化轮询间隔与任务超时；任务线程数由部署环境变量 `KR_TASK_WORKERS` 控制。`GET /api/admin/tasks/{task_id}` 提供完整任务详情，`DELETE /api/admin/tasks/finished` 清理已结束任务，历史积分样本会保留。上述管理接口仅接受管理员会话或管理令牌。
+
 ## 运行
 
 复制 `.env.example` 为 `.env`，设置三个独立随机密钥，然后执行：
