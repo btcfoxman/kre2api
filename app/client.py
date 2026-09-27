@@ -92,6 +92,9 @@ class KreaClient:
                  "domain": cookie.domain, "path": cookie.path}
                 for cookie in self.session.cookies.jar if cookie.domain.endswith("krea.ai")]
 
+    def _image_headers(self) -> dict[str, str]:
+        return {**self.headers, "Referer": f"{BASE}/image"}
+
     def billing(self) -> dict[str, Any]:
         result = self._request("GET", "/api/billing-data")
         if not isinstance(result, dict) or "balance" not in result:
@@ -102,7 +105,12 @@ class KreaClient:
         return float(self.billing().get("balance", {}).get("total") or 0)
 
     @staticmethod
-    def quote_input(normalized: dict[str, Any], *, video_seconds: float = 0) -> dict[str, Any]:
+    def quote_input(normalized: dict[str, Any], *, video_seconds: float = 0,
+                    project_id: str = "") -> dict[str, Any]:
+        if normalized.get("kind") == "image":
+            return {"scope": "image", "inputParams": {
+                **KreaClient.image_generation_input(normalized, project_id, include_prompt=False),
+            }, "batchSize": normalized["batch_size"]}
         params: dict[str, Any] = {
             "provider": normalized["provider"],
             "duration": normalized["duration"],
@@ -121,9 +129,13 @@ class KreaClient:
                 params["referenceImageCount"] = len(normalized["images"])
         return {"scope": "video", "inputParams": params, "promoOptOut": False}
 
-    def estimate(self, normalized: dict[str, Any], *, video_seconds: float = 0) -> float:
+    def estimate(self, normalized: dict[str, Any], *, video_seconds: float = 0,
+                 project_id: str = "") -> float:
         result = self._request("POST", "/api/jobs/estimate",
-                               json=self.quote_input(normalized, video_seconds=video_seconds))
+                               json=self.quote_input(normalized, video_seconds=video_seconds,
+                                                     project_id=project_id),
+                               **({"headers": self._image_headers()}
+                                  if normalized.get("kind") == "image" else {}))
         if not isinstance(result, dict) or result.get("status") != "ready":
             raise KreaError("Krea could not estimate compute units")
         cost = float(result.get("computeUnits") or 0)
@@ -174,7 +186,7 @@ class KreaClient:
             raise ValueError("media file is empty or exceeds 100 MiB")
         return data, filename, mime
 
-    def upload(self, source: str) -> dict[str, Any]:
+    def upload(self, source: str, *, image: bool = False) -> dict[str, Any]:
         if urlparse(source).hostname in ALLOWED_MEDIA_HOSTS:
             return {"imageUrl": source}
         data, filename, mime = self._download_media(source)
@@ -182,7 +194,8 @@ class KreaClient:
         try:
             form.addpart(name="file", filename=filename, data=data, content_type=mime)
             form.addpart(name="createAsset", data="true")
-            result = self._request("POST", "/api/upload", multipart=form)
+            result = self._request("POST", "/api/upload", multipart=form,
+                                   **({"headers": self._image_headers()} if image else {}))
         finally:
             form.close()
         if not isinstance(result, dict) or not result.get("imageUrl"):
@@ -195,7 +208,7 @@ class KreaClient:
         for key in ("images", "videos", "audios"):
             prepared = []
             for item in normalized[key]:
-                uploaded = self.upload(item["url"])
+                uploaded = self.upload(item["url"], image=result.get("kind") == "image")
                 duration = uploaded.get("duration") or item.get("duration")
                 if key == "videos" and duration:
                     video_seconds += float(duration)
@@ -230,22 +243,51 @@ class KreaClient:
                 result[target] = normalized[source]
         return result
 
+    @staticmethod
+    def image_generation_input(normalized: dict[str, Any], project_id: str,
+                               *, include_prompt: bool = True) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "provider": normalized["provider"],
+            "width": normalized["width"], "height": normalized["height"],
+            "strength": normalized["strength"], "steps": normalized["steps"],
+            "guidance_scale_flux": normalized["guidance_scale_flux"],
+            "presetStyles": normalized["preset_styles"],
+            "batchSize": normalized["batch_size"],
+            "styleImages": [
+                {"url": item["url"], "strength": item["strength"],
+                 "source": item.get("source") or "upload"}
+                for item in normalized["images"]
+            ],
+            "project": project_id,
+        }
+        if include_prompt:
+            result["prompt"] = normalized["prompt"]
+        return result
+
     def submit(self, normalized: dict[str, Any], project_id: str) -> list[dict[str, Any]]:
-        payload = self.generation_input(normalized, project_id)
+        image = normalized.get("kind") == "image"
+        payload = (self.image_generation_input(normalized, project_id) if image
+                   else self.generation_input(normalized, project_id))
         form = CurlMime()
         try:
             form.addpart(name="payload", data=json.dumps(
                 payload, ensure_ascii=False, separators=(",", ":")))
-            result = self._request("POST", "/api/jobs/v2/new/videoV2",
-                                   multipart=form)
+            result = self._request("POST", "/api/jobs/v2/new/externalImage" if image
+                                   else "/api/jobs/v2/new/videoV2",
+                                   multipart=form,
+                                   **({"headers": self._image_headers()} if image else {}))
         finally:
             form.close()
-        if not isinstance(result, list) or not result or not result[0].get("job_id"):
+        if not isinstance(result, list) or not result or any(
+                not isinstance(job, dict) or not job.get("job_id") for job in result):
             raise KreaError("Krea submission response is missing job_id")
+        if image and len(result) != normalized["batch_size"]:
+            raise KreaError("Krea image batch response has an unexpected job count")
         return result
 
-    def job(self, job_id: str) -> dict[str, Any]:
-        result = self._request("GET", "/api/job-status", params={"id": job_id})
+    def job(self, job_id: str, *, image: bool = False) -> dict[str, Any]:
+        result = self._request("GET", "/api/job-status", params={"id": job_id},
+                               **({"headers": self._image_headers()} if image else {}))
         if isinstance(result, list):
             for entry in result:
                 if isinstance(entry, dict) and entry.get("job_id") == job_id:

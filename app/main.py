@@ -13,7 +13,8 @@ from fastapi import Body, Cookie, Depends, FastAPI, Header, HTTPException, Reque
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from .catalog import MODELS, normalize_request, public_models
+from .catalog import normalize_request, public_models
+from .image_catalog import is_image_model
 from .batch import parse_batch
 from .browser_login import KreaLoginError
 from .client import KreaClient, KreaError
@@ -118,7 +119,7 @@ def _create(body: dict[str, Any], wait: bool = False) -> dict[str, Any]:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"status": "ok", "service": "kre2api", "models": len(MODELS)}
+    return {"status": "ok", "service": "kre2api", "models": len(public_models())}
 
 
 @app.get("/")
@@ -154,9 +155,50 @@ def create_video(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     return _create(body, wait=body.get("background") is False)
 
 
+@app.post("/v1/images", dependencies=[Depends(api_auth)])
+def create_image(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    value = {**body, "model": body.get("model") or "seedream-5.0-pro"}
+    if not is_image_model(value["model"]):
+        raise HTTPException(status_code=422, detail="an image model is required")
+    return _create(value, wait=body.get("background") is False)
+
+
+@app.post("/v1/images/generations", dependencies=[Depends(api_auth)])
+def generate_images(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    if body.get("background") is True:
+        return create_image(body)
+    task = create_image({**body, "background": False})
+    if task["status"] != "succeeded":
+        raise HTTPException(status_code=502 if task["status"] == "failed" else 504,
+                            detail=task.get("error") or f"image task {task['id']} is not complete")
+    return {"created": task["created_at"], "data": task["data"],
+            "model": task["model"]}
+
+
+@app.get("/v1/images/{task_id}", dependencies=[Depends(api_auth)])
+def get_image(task_id: str) -> dict[str, Any]:
+    task = _task(task_id)
+    if task["normalized"].get("kind") != "image":
+        raise HTTPException(status_code=404, detail="image task not found")
+    return service.public_task(task)
+
+
+@app.get("/v1/images/{task_id}/content", dependencies=[Depends(api_auth)])
+def get_image_content(task_id: str) -> RedirectResponse:
+    task = _task(task_id)
+    if task["normalized"].get("kind") != "image" or task["status"] != "succeeded" or not task["result_urls"]:
+        raise HTTPException(status_code=409, detail="image is not ready")
+    return RedirectResponse(task["result_urls"][0], status_code=307)
+
+
 @app.post("/api/admin/videos", dependencies=[Depends(admin_auth)])
 def admin_create_video(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     return _create(body)
+
+
+@app.post("/api/admin/images", dependencies=[Depends(admin_auth)])
+def admin_create_image(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    return create_image(body)
 
 
 @app.get("/v1/videos/{task_id}", dependencies=[Depends(api_auth)])
@@ -192,9 +234,10 @@ def create_response(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
 
 
 def _response(task: dict[str, Any]) -> dict[str, Any]:
+    kind = task.get("object") or "video"
     return {"id": task["id"], "object": "response", "model": task["model"],
             "status": "completed" if task["status"] == "succeeded" else task["status"],
-            "output": [{"type": "video_generation_call", "video_url": item["url"]}
+            "output": [{"type": f"{kind}_generation_call", f"{kind}_url": item["url"]}
                        for item in task["data"]], "error": task["error"],
             "error_code": task.get("error_code")}
 
@@ -227,7 +270,9 @@ def quote(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
                                    "eligible": False,
                                    "reason": "balance_below_150"})
                     continue
-                cost = client.estimate(normalized, video_seconds=video_seconds)
+                quote = client.estimate(normalized, video_seconds=video_seconds,
+                                        project_id=account["project_id"])
+                cost = service._learned_estimate(normalized, quote, video_seconds)
                 capacity = store.account_capacity(account["id"], balance)
                 eligible = (capacity["enabled"] and capacity["available"] >= cost
                             and capacity["active"] < capacity["max_concurrency"])
@@ -236,6 +281,7 @@ def quote(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
                           "disabled" if not capacity["enabled"] else "")
                 output.append({"account_id": account["id"], "name": account["name"],
                                "balance": balance, "estimated_cost": cost,
+                               "upstream_quote": quote,
                                "reserved_cost": capacity["reserved"],
                                "available_balance": capacity["available"],
                                "available_after": capacity["available"] - cost,
@@ -244,8 +290,11 @@ def quote(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
             except Exception as exc:
                 output.append({"account_id": account["id"], "name": account["name"],
                                "error": str(exc)[:300], "eligible": False})
-        return {"model": normalized["model"], "duration": normalized["duration"],
-                "resolution": normalized["resolution"], "accounts": output,
+        return {"model": normalized["model"], "kind": normalized.get("kind", "video"),
+                "duration": normalized["duration"],
+                "resolution": normalized["resolution"],
+                "width": normalized.get("width"), "height": normalized.get("height"),
+                "n": normalized.get("batch_size"), "accounts": output,
                 "source": "krea_jobs_estimate"}
     except Exception as exc:
         raise _raise(exc) from exc

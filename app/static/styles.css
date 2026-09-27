@@ -531,3 +531,4 @@ dialog.settings-dialog { width: min(980px, calc(100vw - 28px)); height: min(460p
   .settings-dialog-footer > span { display: none; }
   .settings-dialog-footer > div { width: 100%; justify-content: flex-end; }
 }
+.form-grid .image-field[hidden], .form-grid .video-field[hidden] { display: none !important; }

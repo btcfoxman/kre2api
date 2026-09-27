@@ -224,7 +224,15 @@ class Service:
                           video_seconds: float) -> float:
         ratios = []
         for sample in self.store.cost_samples(200):
-            if (sample["model"] == normalized["model"]
+            if normalized.get("kind") == "image":
+                if (sample["model"] == normalized["model"]
+                        and sample.get("width") == normalized["width"]
+                        and sample.get("height") == normalized["height"]
+                        and sample.get("batch_size") == normalized["batch_size"]
+                        and sample["image_count"] == len(normalized["images"])
+                        and sample["estimated_cost"] > 0):
+                    ratios.append(sample["actual_cost"] / sample["estimated_cost"])
+            elif (sample["model"] == normalized["model"]
                     and sample["duration"] == normalized["duration"]
                     and sample["resolution"] == normalized["resolution"]
                     and sample["video_count"] == len(normalized["videos"])
@@ -263,7 +271,11 @@ class Service:
                 if balance < MIN_ACCOUNT_BALANCE:
                     outcomes.append("insufficient")
                     continue
-                quote = client.estimate(normalized, video_seconds=video_seconds)
+                quote = client.estimate(
+                    normalized, video_seconds=video_seconds,
+                    **({"project_id": account["project_id"]}
+                       if normalized.get("kind") == "image" else {}),
+                )
                 cost = self._learned_estimate(normalized, quote, video_seconds)
                 result = self.store.reserve_task_result(
                     task_id=task_id, account_id=account["id"], model=normalized["model"],
@@ -309,7 +321,11 @@ class Service:
             try:
                 self.store.update_task(task_id, status="preparing")
                 normalized, video_seconds = client.prepare_media(task["normalized"])
-                quote = client.estimate(normalized, video_seconds=video_seconds)
+                quote = client.estimate(
+                    normalized, video_seconds=video_seconds,
+                    **({"project_id": account["project_id"]}
+                       if normalized.get("kind") == "image" else {}),
+                )
                 balance = client.balance()
                 cost = self._learned_estimate(normalized, quote, video_seconds)
                 self.store.set_account(account["id"], balance=balance,
@@ -322,8 +338,13 @@ class Service:
                     raise KreaError(INSUFFICIENT_CREDITS_MESSAGE, 402,
                                     code="INSUFFICIENT_CREDITS")
                 self.store.update_task(task_id, normalized_json=json.dumps(normalized, ensure_ascii=False))
-                upstream_request = {"method": "POST", "path": "/api/jobs/v2/new/videoV2",
-                                    "payload": client.generation_input(normalized, account["project_id"])}
+                image = normalized.get("kind") == "image"
+                upstream_request = {
+                    "method": "POST",
+                    "path": "/api/jobs/v2/new/externalImage" if image else "/api/jobs/v2/new/videoV2",
+                    "payload": (client.image_generation_input(normalized, account["project_id"])
+                                if image else client.generation_input(normalized, account["project_id"])),
+                }
                 self.store.update_task(task_id, upstream_request_json=json.dumps(upstream_request, ensure_ascii=False))
                 self.store.update_task(task_id, status="submitting")
                 jobs = client.submit(normalized, account["project_id"])
@@ -407,12 +428,20 @@ class Service:
         if not account:
             return
         client = self._client(account)
-        job = client.job(task["upstream_job_id"])
+        image = task["normalized"].get("kind") == "image"
+        submission = task.get("upstream_response", {}).get("submission") or []
+        job_ids = ([str(item["job_id"]) for item in submission
+                    if isinstance(item, dict) and item.get("job_id")]
+                   if image else []) or [task["upstream_job_id"]]
+        jobs = [client.job(job_id, **({"image": True} if image else {}))
+                for job_id in job_ids]
+        job = jobs[0]
         self.store.update_task(task["id"], upstream_response_json=json.dumps({
-            **task.get("upstream_response", {}), "latest_status": job,
+            **task.get("upstream_response", {}),
+            "latest_status": jobs if image else job,
         }, ensure_ascii=False))
-        status = str(job.get("status") or "")
-        if status not in TERMINAL_STATUSES:
+        statuses = [str(item.get("status") or "") for item in jobs]
+        if any(status not in TERMINAL_STATUSES for status in statuses):
             self.store.update_task(task["id"], status="running")
             self.store.set_account(account["id"], cookies=client.export_cookies())
             return
@@ -421,9 +450,9 @@ class Service:
         estimate = float(task.get("estimated_cost") or 0)
         actual = (observed if not self.store.task_overlapped(task)
                   and 0.5 * estimate <= observed <= 1.5 * estimate else None)
-        if status == "completed":
-            urls = result_urls(job)
-            if urls:
+        if all(status == "completed" for status in statuses):
+            urls = [url for item in jobs for url in result_urls(item)]
+            if urls and (not image or len(urls) >= len(job_ids)):
                 self.store.update_task(task["id"], status="succeeded",
                                        result_json=json.dumps(urls),
                                        reserved_cost=0, actual_cost=actual,
@@ -436,26 +465,34 @@ class Service:
             else:
                 self.store.update_task(task["id"], status="failed", reserved_cost=0,
                                        balance_after=balance_after,
-                                       error="Krea completed without a video URL")
+                                       error=(f"Krea image batch returned {len(urls)}/{len(job_ids)} images"
+                                              if image else "Krea completed without a video URL"))
         else:
             unchanged_balance = (task.get("balance_before") is not None
                                  and abs(float(task["balance_before"]) - balance_after) < 0.001
                                  and not self.store.task_overlapped(task))
             self.store.update_task(task["id"], status="failed", reserved_cost=0,
                                    balance_after=balance_after,
-                                   error=failure_message(job, refund_confirmed=unchanged_balance))
+                                   error=failure_message(next((item for item in jobs
+                                                               if item.get("status") != "completed"), job),
+                                                         refund_confirmed=unchanged_balance))
         self.store.set_account(account["id"], balance=balance_after,
                                cookies=client.export_cookies())
 
     @staticmethod
     def public_task(task: dict[str, Any]) -> dict[str, Any]:
         normalized = task.get("normalized") or {}
+        image = normalized.get("kind") == "image"
         return {
-            "id": task["id"], "object": "video", "created_at": int(task["created_at"]),
+            "id": task["id"], "object": "image" if image else "video",
+            "created_at": int(task["created_at"]),
             "status": task["status"], "model": task["model"],
-            "duration": normalized.get("duration"),
+            "duration": None if image else normalized.get("duration"),
             "resolution": normalized.get("resolution"),
             "aspect_ratio": normalized.get("aspect_ratio"),
+            "width": normalized.get("width") if image else None,
+            "height": normalized.get("height") if image else None,
+            "n": normalized.get("batch_size") if image else None,
             "account_id": task["account_id"],
             "estimated_cost": task["estimated_cost"],
             "actual_cost": task["actual_cost"],

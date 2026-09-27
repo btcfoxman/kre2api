@@ -116,6 +116,10 @@ def normalize_prompt(prompt: str, counts: dict[str, int]) -> str:
 
 
 def normalize_request(data: dict[str, Any]) -> dict[str, Any]:
+    from .image_catalog import is_image_model, normalize_image_request
+
+    if is_image_model(data.get("model")):
+        return normalize_image_request(data)
     requested = str(data.get("model") or "sd-2-0").strip().lower()
     if requested not in MODELS:
         raise ValueError(f"unsupported model: {requested}")
@@ -146,6 +150,7 @@ def normalize_request(data: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError(f"{requested} video references must be at most {model.max_reference_seconds}s")
     counts = {"Image": len(images), "Video": len(videos), "Audio": len(audios)}
     result = {
+        "kind": "video",
         "model": requested,
         "provider": model.provider,
         "prompt": normalize_prompt(prompt, counts),
@@ -170,10 +175,13 @@ def normalize_request(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def public_models() -> list[dict[str, Any]]:
+    from .image_catalog import public_image_models
+
     return [{
         "id": spec.name, "object": "model", "owned_by": "krea",
+        "kind": "video",
         "capabilities": {"durations": list(spec.durations), "resolutions": list(spec.resolutions),
                          "aspect_ratios": list(spec.ratios), "media_limits": {
                              "images": spec.images, "videos": spec.videos, "audio": spec.audios}},
         "upstream_provider": spec.provider,
-    } for spec in MODELS.values()]
+    } for spec in MODELS.values()] + public_image_models()

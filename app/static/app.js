@@ -47,16 +47,18 @@ function renderAccounts() {
 }
 function renderTasks() {
   const tasks = state.tasks;
-  $("#taskCount").textContent = tasks.length + " 个任务";
+  $("#taskCount").textContent = tasks.length + " \u4e2a\u4efb\u52a1";
   $("#metricRunning").textContent = tasks.filter((item) => !["succeeded","failed","expired"].includes(item.status)).length;
   $("#metricComplete").textContent = tasks.filter((item) => item.status === "succeeded").length;
   $("#tasksEmpty").classList.toggle("show", !tasks.length);
   $("#tasksBody").innerHTML = tasks.map((item) => {
     const account = state.accounts.find((entry) => entry.id === item.account_id);
+    const image = item.object === "image";
     const url = item.data?.[0]?.url;
-    const result = url && /^https?:\/\//i.test(url) ? '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">查看视频 ↗</a>' : esc(item.error || "—");
+    const result = url && /^https?:\/\//i.test(url) ? '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + (image ? "\u67e5\u770b\u56fe\u7247" : "\u67e5\u770b\u89c6\u9891") + ' \u2197</a>' : esc(item.error || "\u2014");
+    const parameters = image ? `${item.width}x${item.height} \u00b7 ${item.n || 1} \u5f20` : `${item.duration}s \u00b7 ${item.resolution} \u00b7 ${item.aspect_ratio}`;
     return '<tr><td><button class="link-button cell-title mono" data-task="' + esc(item.id) + '">' + esc(item.id) + '</button><span class="cell-sub">' + esc(account?.name || item.account_id) + '</span></td>' +
-      '<td><span class="cell-title">' + esc(item.model) + '</span><span class="cell-sub">' + esc(item.duration) + 's · ' + esc(item.resolution) + ' · ' + esc(item.aspect_ratio) + '</span></td>' +
+      '<td><span class="cell-title">' + esc(item.model) + '</span><span class="cell-sub">' + esc(parameters) + '</span></td>' +
       '<td><span class="badge ' + esc(item.status) + '">' + esc(item.status) + '</span></td><td class="mono">' + num(item.estimated_cost) + ' / ' + num(item.actual_cost) + '</td><td>' + stamp(item.created_at) + '</td><td class="result-links">' + result + '</td></tr>';
   }).join("");
 }
@@ -72,15 +74,22 @@ function modelOptions() {
 function updateModel(prefix) {
   const model = state.models.find((item) => item.id === $("#" + prefix + "Model").value);
   if (!model) return;
-  const preferred = model.id.match(/(480p|1080p|4k|768p)$/)?.[1] || (model.id === "minimax-h3" ? "2k" : "720p");
+  const image = model.kind === "image";
+  const preferred = image ? "2k" : model.id.match(/(480p|1080p|4k|768p)$/)?.[1] || (model.id === "minimax-h3" ? "2k" : "720p");
   $("#" + prefix + "Resolution").innerHTML = model.capabilities.resolutions.map((value) =>
     '<option value="' + esc(value) + '"' + (value === preferred ? " selected" : "") + '>' + esc(value) + '</option>').join("");
   $("#" + prefix + "Ratio").innerHTML = model.capabilities.aspect_ratios.map((value) =>
     '<option value="' + esc(value) + '">' + esc(value) + '</option>').join("");
-  const duration = $("#" + prefix + "Form").elements.duration;
-  const supported = model.capabilities.durations;
-  duration.min = Math.min(...supported); duration.max = Math.max(...supported);
-  if (!supported.includes(Number(duration.value))) duration.value = supported[0];
+  const form = $("#" + prefix + "Form");
+  for (const field of form.querySelectorAll(".image-field")) field.hidden = !image;
+  for (const field of form.querySelectorAll(".video-field")) field.hidden = image;
+  const duration = form.elements.duration;
+  duration.required = !image;
+  if (!image) {
+    const supported = model.capabilities.durations || [];
+    duration.min = Math.min(...supported); duration.max = Math.max(...supported);
+    if (!supported.includes(Number(duration.value))) duration.value = supported[0];
+  }
 }
 function accountOptions() {
   const taskValue = $("#taskAccount").value;
@@ -108,20 +117,36 @@ async function loadCosts() {
   try {
     const samples = await api("/api/admin/model-costs?limit=100");
     $("#costEmpty").classList.toggle("show", !samples.length);
-    $("#costSamples").innerHTML = samples.map((item) => '<tr><td class="mono">' + esc(item.model) + '</td><td>' + esc(item.duration) + 's · ' + esc(item.resolution) + '</td><td>' + esc(item.video_count) + ' 个 / ' + num(item.video_reference_seconds) + 's</td><td class="mono">' + num(item.estimated_cost) + '</td><td class="mono cost-value">' + num(item.actual_cost) + '</td><td>' + stamp(item.observed_at) + '</td></tr>').join("");
+    $("#costSamples").innerHTML = samples.map((item) => {
+      const image = item.duration === 0;
+      const dimensions = image ? `${item.width}x${item.height} \u00b7 ${item.batch_size} \u5f20` : `${item.duration}s \u00b7 ${item.resolution}`;
+      const refs = image ? `${item.image_count} \u5f20\u53c2\u8003\u56fe` : `${item.video_count} \u4e2a / ${num(item.video_reference_seconds)}s`;
+      return '<tr><td class="mono">' + esc(item.model) + '</td><td>' + esc(dimensions) + '</td><td>' + esc(refs) + '</td><td class="mono">' + num(item.estimated_cost) + '</td><td class="mono cost-value">' + num(item.actual_cost) + '</td><td>' + stamp(item.observed_at) + '</td></tr>';
+    }).join("");
   } catch (error) { toast(error.message, true); }
 }
 function payload(form) {
   const fields = Object.fromEntries(new FormData(form));
-  const result = {model: fields.model, duration: Number(fields.duration), resolution: fields.resolution, aspect_ratio: fields.aspect_ratio};
+  const model = state.models.find((item) => item.id === fields.model);
+  const result = {model: fields.model, resolution: fields.resolution, aspect_ratio: fields.aspect_ratio};
+  if (model?.kind === "image") {
+    result.n = Number(fields.n || 1);
+    if (fields.width) result.width = Number(fields.width);
+    if (fields.height) result.height = Number(fields.height);
+    for (const key of ["reference_strength", "steps", "guidance_scale_flux"]) {
+      if (fields[key] !== undefined && fields[key] !== "") result[key] = Number(fields[key]);
+    }
+  } else result.duration = Number(fields.duration);
   if (fields.account_id) result.account_id = Number(fields.account_id);
   return result;
 }
 function docs() {
   const base = location.origin;
-  return "KRE2API 视频接口\n\nPOST " + base + "/v1/videos\nAuthorization: Bearer <KR_API_KEY>\nContent-Type: application/json\n\n" +
-    JSON.stringify({model:"sd-2-0", prompt:"视频描述", duration:5, resolution:"720p", aspect_ratio:"16:9", generate_audio:true, image_urls:[]}, null, 2) +
-    "\n\n查询结果：GET " + base + "/v1/videos/{task_id}\n任务状态：queued / preparing / submitting / running / succeeded / failed / expired\n成功后从 data[0].url 获取视频。\n\n模型能力：GET " + base + "/v1/models\n实时积分预估：POST " + base + "/api/quote\n详细 OpenAPI：" + base + "/docs";
+  return "KRE2API \u89c6\u9891\u63a5\u53e3\n\nPOST " + base + "/v1/videos\nAuthorization: Bearer <KR_API_KEY>\nContent-Type: application/json\n\n" +
+    JSON.stringify({model:"sd-2-0", prompt:"Video prompt", duration:5, resolution:"720p", aspect_ratio:"16:9", image_urls:[]}, null, 2) +
+    "\n\n\u56fe\u7247\u63a5\u53e3\uff1aPOST " + base + "/v1/images\n" +
+    JSON.stringify({model:"seedream-5.0-pro", prompt:"Image prompt", resolution:"2k", aspect_ratio:"16:9", n:2, image_urls:[]}, null, 2) +
+    "\n\n\u56fe\u7247\u7ed3\u679c\uff1aGET " + base + "/v1/images/{task_id}\n\u89c6\u9891\u7ed3\u679c\uff1aGET " + base + "/v1/videos/{task_id}\n\u5b9e\u65f6\u79ef\u5206\u9884\u4f30\uff1aPOST " + base + "/api/quote\n\u6a21\u578b\u80fd\u529b\uff1aGET " + base + "/v1/models\nOpenAPI: " + base + "/docs";
 }
 function detailTab(key) {
   const item = state.detail;
@@ -133,7 +158,7 @@ async function openDetail(id) {
   try {
     const item = await api("/api/admin/tasks/" + encodeURIComponent(id));
     state.detail = item; $("#detailId").textContent = item.id;
-    const facts = [["状态", item.status],["模型", item.model],["账号", state.accounts.find((entry) => entry.id === item.account_id)?.name || item.account_id],["时长 / 格式", item.duration + "s · " + item.resolution + " · " + item.aspect_ratio],["预估 / 实际", num(item.estimated_cost) + " / " + num(item.actual_cost)],["创建时间", stamp(item.created_at)]];
+    const facts = [["\u72b6\u6001", item.status],["\u6a21\u578b", item.model],["\u8d26\u53f7", state.accounts.find((entry) => entry.id === item.account_id)?.name || item.account_id],[item.object === "image" ? "\u5c3a\u5bf8 / \u6570\u91cf" : "\u65f6\u957f / \u683c\u5f0f", item.object === "image" ? `${item.width}x${item.height} \u00b7 ${item.n || 1} \u5f20` : `${item.duration}s \u00b7 ${item.resolution} \u00b7 ${item.aspect_ratio}`],["\u9884\u4f30 / \u5b9e\u9645", num(item.estimated_cost) + " / " + num(item.actual_cost)],["\u521b\u5efa\u65f6\u95f4", stamp(item.created_at)]];
     $("#detailFacts").innerHTML = facts.map(([label, value]) => '<div><span>' + esc(label) + '</span><b title="' + esc(value) + '">' + esc(value) + '</b></div>').join("");
     $("#detailPrompt").textContent = item.request?.prompt || "—";
     $("#detailMeta").textContent = item.error || (item.upstream_job_id ? "Krea Job " + item.upstream_job_id : "");
@@ -228,11 +253,14 @@ $("#costModel").addEventListener("change", () => updateModel("cost"));
 $("#taskForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget, values = Object.fromEntries(new FormData(form));
-  const body = {...payload(form), prompt:values.prompt, generate_audio:form.elements.generate_audio.checked};
-  for (const key of ["image_urls","video_urls","audio_urls"]) body[key] = (values[key] || "").split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  const body = {...payload(form), prompt:values.prompt};
+  const image = state.models.find((item) => item.id === body.model)?.kind === "image";
+  if (!image) body.generate_audio = form.elements.generate_audio.checked;
+  for (const key of image ? ["image_urls"] : ["image_urls","video_urls","audio_urls"])
+    body[key] = (values[key] || "").split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
   $("#taskFormMessage").textContent = "正在询价、选择账号并创建任务…";
   try {
-    const item = await api("/api/admin/videos", {method:"POST", body:JSON.stringify(body)});
+    const item = await api(image ? "/api/admin/images" : "/api/admin/videos", {method:"POST", body:JSON.stringify(body)});
     $("#taskFormMessage").textContent = "已创建 " + item.id;
     await refresh(); toast("任务已提交");
   } catch (error) { $("#taskFormMessage").textContent = error.message; toast(error.message, true); }
@@ -263,8 +291,11 @@ $("#integrationDocsButton").addEventListener("click", () => { $("#docsCode").tex
 $("#costReferenceButton").addEventListener("click", () => { show($("#costDialog")); loadCosts(); });
 $("#costForm").addEventListener("submit", async (event) => {
   event.preventDefault(); const form = event.currentTarget, values = Object.fromEntries(new FormData(form));
+  const image = state.models.find((item) => item.id === values.model)?.kind === "image";
   const count = Number(values.video_count || 0), seconds = Number(values.video_seconds || 0);
-  const body = {...payload(form), prompt:"询价", video_urls:Array.from({length:count}, (_, index) => ({url:"https://example.invalid/reference-" + (index + 1) + ".mp4", duration:count ? seconds / count : 0}))};
+  const body = image
+    ? {...payload(form), prompt:"quote", image_urls:Array.from({length:Number(values.image_count || 0)}, (_, index) => "https://example.invalid/reference-" + (index + 1) + ".png")}
+    : {...payload(form), prompt:"quote", video_urls:Array.from({length:count}, (_, index) => ({url:"https://example.invalid/reference-" + (index + 1) + ".mp4", duration:count ? seconds / count : 0}))};
   const box = $("#quoteResult"); box.hidden = false; box.textContent = "正在向 Krea 询价…";
   try { const result = await api("/api/admin/quote", {method:"POST", body:JSON.stringify(body)});
     const reasons = {balance_below_150:"积分低于 150，已自动停用", insufficient_credits:"可用积分不足", busy:"账号并发已满", disabled:"账号已停用"};

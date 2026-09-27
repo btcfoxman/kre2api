@@ -79,6 +79,9 @@ class Store:
                     provider TEXT NOT NULL,
                     duration INTEGER NOT NULL,
                     resolution TEXT NOT NULL,
+                    width INTEGER NOT NULL DEFAULT 0,
+                    height INTEGER NOT NULL DEFAULT 0,
+                    batch_size INTEGER NOT NULL DEFAULT 1,
                     video_reference_seconds REAL NOT NULL,
                     image_count INTEGER NOT NULL,
                     video_count INTEGER NOT NULL,
@@ -98,6 +101,12 @@ class Store:
                 if column not in task_columns:
                     db.execute(f"ALTER TABLE tasks ADD COLUMN {column} TEXT NOT NULL DEFAULT '{{}}'")
             account_columns = {row["name"] for row in db.execute("PRAGMA table_info(accounts)")}
+            cost_columns = {row["name"] for row in db.execute("PRAGMA table_info(cost_samples)")}
+            for column, definition in (("width", "INTEGER NOT NULL DEFAULT 0"),
+                                       ("height", "INTEGER NOT NULL DEFAULT 0"),
+                                       ("batch_size", "INTEGER NOT NULL DEFAULT 1")):
+                if column not in cost_columns:
+                    db.execute(f"ALTER TABLE cost_samples ADD COLUMN {column} {definition}")
             if "password_ciphertext" not in account_columns:
                 db.execute("ALTER TABLE accounts ADD COLUMN password_ciphertext TEXT NOT NULL DEFAULT ''")
             if "login_status" not in account_columns:
@@ -361,11 +370,13 @@ class Store:
         with self._connect() as db:
             db.execute("""
                 INSERT OR REPLACE INTO cost_samples(
-                    task_id,model,provider,duration,resolution,video_reference_seconds,
+                    task_id,model,provider,duration,resolution,width,height,batch_size,video_reference_seconds,
                     image_count,video_count,audio_count,estimated_cost,actual_cost,observed_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (task["id"], task["model"], data["provider"], data["duration"],
-                  data["resolution"], video_reference_seconds, len(data["images"]),
+                  data["resolution"], int(data.get("width") or 0),
+                  int(data.get("height") or 0), int(data.get("batch_size") or 1),
+                  video_reference_seconds, len(data["images"]),
                   len(data["videos"]), len(data["audios"]), task["estimated_cost"],
                   actual, time.time()))
 
