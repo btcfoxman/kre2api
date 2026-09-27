@@ -15,7 +15,7 @@ from typing import Any
 
 from .catalog import normalize_request
 from .client import KreaClient, KreaError, TERMINAL_STATUSES
-from .browser_login import KreaLoginError, login as browser_login
+from .browser_login import KreaLoginError, login as browser_login, new_project_id
 from .credentials import decrypt_password
 from .manual_browser import ManualBrowser
 from .store import Store
@@ -171,7 +171,7 @@ class Service:
         cookies, user_agent, project = browser.capture(account["name"])
         balance = KreaClient(cookies=cookies, proxy_url=account["proxy_url"],
                              user_agent=user_agent).balance()
-        project = project or account["project_id"]
+        project = project or account["project_id"] or new_project_id()
         self.store.set_account(account_id, cookies=cookies, user_agent=user_agent,
                                project_id=project, balance=balance,
                                login_status="ready" if project else "project_required",

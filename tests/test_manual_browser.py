@@ -1,3 +1,5 @@
+import uuid
+
 from app.credentials import encrypt_password
 from app.service import Service
 from app.store import Store
@@ -28,7 +30,7 @@ def test_manual_login_preserves_account_identity_and_session(tmp_path, monkeypat
 
         def capture(self, email):
             assert email == "owner@example.com"
-            return [{"name": "session", "value": "private"}], "Chrome", "video-project"
+            return [{"name": "session", "value": "private"}], "Chrome", ""
 
         def close(self):
             self.closed = True
@@ -51,8 +53,8 @@ def test_manual_login_preserves_account_identity_and_session(tmp_path, monkeypat
         assert service.manual_browser_action(account["id"], {"action": "login"}) == {
             "action_result": {"phase": "signed_in"}}
         saved = service.complete_manual_browser(account["id"])
-        assert (saved["login_status"], saved["project_id"], saved["balance"]) == (
-            "ready", "video-project", 28.5)
+        assert (saved["login_status"], saved["balance"]) == ("ready", 28.5)
+        assert uuid.UUID(saved["project_id"]).version == 7
         assert saved["cookies"][0]["value"] == "private"
         assert opened[0].closed
     finally:

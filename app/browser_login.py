@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import time
 import urllib.request
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -21,6 +22,15 @@ class KreaLoginError(Exception):
     def __init__(self, message: str, status: str = "login_failed") -> None:
         super().__init__(message)
         self.status = status
+
+
+def new_project_id() -> str:
+    """Match the UUIDv7 draft project ID created by Krea's video page."""
+    timestamp = int(time.time() * 1000).to_bytes(6, "big")
+    random = os.urandom(10)
+    value = (timestamp + bytes([0x70 | (random[0] & 0x0f), random[1],
+                                0x80 | (random[2] & 0x3f)]) + random[3:])
+    return str(uuid.UUID(bytes=value))
 
 
 def browser_proxy(proxy_url: str) -> str:
@@ -217,7 +227,7 @@ async def _login_cdp(port: int, email: str, password: str, timeout: int
                 videos = [item for item in sessions if isinstance(item, dict)
                           and item.get("tool") == "videoV2" and item.get("id")]
                 videos.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
-                project = str(videos[0]["id"]) if videos else ""
+                project = str(videos[0]["id"]) if videos else new_project_id()
                 return cookies, user_agent, project, float((state["balance"] or {}).get("total") or 0)
 
             form = await cdp.evaluate("""({

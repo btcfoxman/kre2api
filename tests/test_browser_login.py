@@ -1,10 +1,12 @@
 import base64
 import json
 import os
+import time
+import uuid
 
 import pytest
 
-from app.browser_login import _account_email, _remove_stale_singletons
+from app.browser_login import _account_email, _remove_stale_singletons, new_project_id
 
 
 def test_session_identity_is_read_from_krea_cookie():
@@ -14,6 +16,13 @@ def test_session_identity_is_read_from_krea_cookie():
     assert _account_email([{"name": "sb-superb-auth-token",
                             "value": "base64-" + encoded}]) == "imported@example.com"
     assert _account_email([{"name": "other", "value": encoded}]) == ""
+
+
+def test_new_video_project_matches_krea_uuid_v7_format():
+    first, second = uuid.UUID(new_project_id()), uuid.UUID(new_project_id())
+    assert first.version == second.version == 7
+    assert first != second
+    assert abs((first.int >> 80) - int(time.time() * 1000)) < 1000
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows test runners cannot always create symlinks")
