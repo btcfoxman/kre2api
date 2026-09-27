@@ -45,7 +45,7 @@ GET /v1/videos/{task_id}/content
 
 批量导入支持每行 `邮箱|密码|代理`，代理可留空，也可写 `host:port`、`http(s)://...` 或 `socks5://...`。同一批次重复邮箱以最后一行为准；导入结果逐行报告格式错误、合并数量和启动登录数量。`POST /api/accounts/batch-import` 与管理页“批量导入”使用同一流程，示例请求体为 `{"text":"user@example.com|password|socks5://host:1080","start_login":true,"max_concurrency":1}`。密码以加密形式存入 SQLite，不通过管理 API 返回；加密密钥优先使用 `KR_CREDENTIAL_KEY`，未配置时使用 `KR_ADMIN_TOKEN`，更换密钥后需重新导入密码。建议在第一次导入前固定配置 `KR_CREDENTIAL_KEY`。
 
-导入后使用容器中的 Chromium 打开 Krea 原生登录页，继承该账号代理出口，并在登录成功后读取 Cookie、余额及现有视频项目。Cloudflare 验证若无法自动完成，账号显示“待网页验证”，不会进入任务账号池；可按下方 CDP 同步方式手动补充会话。若账号尚无视频项目，则显示“缺少项目”，需先在 Krea 网页创建并在账号设置填写项目 ID。账号行可重试登录。浏览器资料保存在 `/app/data/kr-chrome-profiles`，应和 SQLite 数据库一样避免提交到 Git。
+导入后使用容器中的原生 Chromium 和 CDP 打开 Krea 登录页，继承该账号代理出口，并在登录成功后核对会话邮箱、读取 Cookie、余额及现有视频项目；登录流程不启动 Playwright。可见的 Cloudflare 验证框只尝试一次浏览器点击；若仍需人工验证，账号显示“待网页验证”，不会进入任务账号池，可按下方 CDP 同步方式手动补充会话。若账号尚无视频项目，则显示“缺少项目”，需先在 Krea 网页完成一笔视频任务以建立项目，再重试登录或在账号设置填写项目 ID。账号行可重试登录。浏览器资料保存在 `/app/data/kr-native-profiles`，应和 SQLite 数据库一样避免提交到 Git。
 
 ## 运行
 
