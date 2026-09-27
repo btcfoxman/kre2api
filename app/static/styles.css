@@ -30,6 +30,8 @@
 .browser-assist-viewport img { display: block; width: 100%; height: auto; cursor: crosshair; user-select: none; }
 .browser-assist-viewport.busy img { cursor: progress; pointer-events: none; }
 .browser-assist-footer { background: var(--surface); }
+.browser-assist-input { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
+.browser-assist-input input { min-width: 160px; max-width: 240px; }
 @media (max-width: 700px) {
   .browser-assist-dialog { width: calc(100vw - 16px); }
   .browser-assist-header, .browser-assist-footer { padding: 14px; }

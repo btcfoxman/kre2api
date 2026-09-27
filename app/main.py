@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .catalog import MODELS, normalize_request, public_models
 from .batch import parse_batch
+from .browser_login import KreaLoginError
 from .client import KreaClient, KreaError
 from .credentials import encrypt_password
 from .service import Service
@@ -81,6 +82,9 @@ def _raise(exc: Exception) -> HTTPException:
         return exc
     if isinstance(exc, KreaError):
         return HTTPException(status_code=exc.status_code, detail=str(exc))
+    if isinstance(exc, KreaLoginError):
+        return HTTPException(status_code=409 if exc.status == "challenge_required" else 503,
+                             detail=str(exc))
     if isinstance(exc, (ValueError, TypeError, IndexError)):
         return HTTPException(status_code=422, detail=str(exc))
     return HTTPException(status_code=500, detail="internal task error")
@@ -317,6 +321,46 @@ def login_account(account_id: int) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail="account has no imported password")
     started = service.schedule_login(account_id)
     return {"started": started, "account": _public_account(store.account(account_id))}
+
+
+@app.post("/api/admin/accounts/{account_id}/browser/open", dependencies=[Depends(admin_auth)])
+def open_account_browser(account_id: int) -> JSONResponse:
+    try:
+        return JSONResponse(service.open_manual_browser(account_id),
+                            headers={"Cache-Control": "no-store"})
+    except Exception as exc:
+        raise _raise(exc) from exc
+
+
+@app.get("/api/admin/accounts/{account_id}/browser", dependencies=[Depends(admin_auth)])
+def account_browser_snapshot(account_id: int) -> JSONResponse:
+    try:
+        return JSONResponse(service.manual_browser_snapshot(account_id),
+                            headers={"Cache-Control": "no-store"})
+    except Exception as exc:
+        raise _raise(exc) from exc
+
+
+@app.post("/api/admin/accounts/{account_id}/browser/action", dependencies=[Depends(admin_auth)])
+def account_browser_action(account_id: int, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    try:
+        return service.manual_browser_action(account_id, body)
+    except Exception as exc:
+        raise _raise(exc) from exc
+
+
+@app.post("/api/admin/accounts/{account_id}/browser/complete", dependencies=[Depends(admin_auth)])
+def complete_account_browser(account_id: int) -> dict[str, Any]:
+    try:
+        return _public_account(service.complete_manual_browser(account_id))
+    except Exception as exc:
+        raise _raise(exc) from exc
+
+
+@app.post("/api/admin/accounts/{account_id}/browser/close", dependencies=[Depends(admin_auth)])
+def close_account_browser(account_id: int) -> dict[str, bool]:
+    service.close_manual_browser(account_id)
+    return {"closed": True}
 
 
 @app.patch("/api/admin/accounts/{account_id}", dependencies=[Depends(admin_auth)])

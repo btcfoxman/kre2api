@@ -17,6 +17,7 @@ from .catalog import normalize_request
 from .client import KreaClient, KreaError, TERMINAL_STATUSES
 from .browser_login import KreaLoginError, login as browser_login
 from .credentials import decrypt_password
+from .manual_browser import ManualBrowser
 from .store import Store
 
 
@@ -89,6 +90,7 @@ class Service:
         self.lock = threading.Lock()
         self.login_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="kre-login")
         self.login_inflight: set[int] = set()
+        self.manual_browsers: dict[int, ManualBrowser] = {}
 
     def start(self) -> None:
         for account in self.store.accounts():
@@ -106,6 +108,8 @@ class Service:
 
     def stop(self) -> None:
         self.stop_event.set()
+        for account_id in list(self.manual_browsers):
+            self.close_manual_browser(account_id)
         if self.poll_thread:
             self.poll_thread.join(timeout=3)
         self.executor.shutdown(wait=False, cancel_futures=True)
@@ -114,7 +118,8 @@ class Service:
     def schedule_login(self, account_id: int) -> bool:
         with self.lock:
             account = self.store.account(account_id)
-            if not account or not account["enabled"] or not account["has_password"] or account_id in self.login_inflight:
+            if (not account or not account["enabled"] or not account["has_password"]
+                    or account_id in self.login_inflight or account_id in self.manual_browsers):
                 return False
             self.login_inflight.add(account_id)
             self.store.set_account(account_id, login_status="login_pending", last_error="")
@@ -129,6 +134,56 @@ class Service:
     def _finish_login(self, account_id: int) -> None:
         with self.lock:
             self.login_inflight.discard(account_id)
+
+    def open_manual_browser(self, account_id: int) -> dict[str, Any]:
+        with self.lock:
+            account = self.store.account(account_id)
+            if not account:
+                raise ValueError("account not found")
+            if account_id in self.login_inflight:
+                raise KreaLoginError("Automatic login is still running; retry shortly", "login_pending")
+            browser = self.manual_browsers.get(account_id)
+            if browser is None:
+                browser = ManualBrowser(account_id, account["proxy_url"],
+                                        Path(os.getenv("KR_DATA_DIR", "/app/data")))
+                self.manual_browsers[account_id] = browser
+        return browser.snapshot()
+
+    def manual_browser_snapshot(self, account_id: int) -> dict[str, Any]:
+        browser = self.manual_browsers.get(account_id)
+        if browser is None:
+            raise ValueError("account browser is not open")
+        return browser.snapshot()
+
+    def manual_browser_action(self, account_id: int, action: dict[str, Any]) -> dict[str, Any]:
+        browser = self.manual_browsers.get(account_id)
+        account = self.store.account(account_id)
+        if browser is None or account is None:
+            raise ValueError("account browser is not open")
+        password = decrypt_password(self.store.credential(account_id)) if action.get("action") == "login" else ""
+        return {"action_result": browser.action(action, account["name"], password)}
+
+    def complete_manual_browser(self, account_id: int) -> dict[str, Any]:
+        browser = self.manual_browsers.get(account_id)
+        account = self.store.account(account_id)
+        if browser is None or account is None:
+            raise ValueError("account browser is not open")
+        cookies, user_agent, project = browser.capture(account["name"])
+        balance = KreaClient(cookies=cookies, proxy_url=account["proxy_url"],
+                             user_agent=user_agent).balance()
+        project = project or account["project_id"]
+        self.store.set_account(account_id, cookies=cookies, user_agent=user_agent,
+                               project_id=project, balance=balance,
+                               login_status="ready" if project else "project_required",
+                               last_error="" if project else "Create a Krea video project and set its ID")
+        self.close_manual_browser(account_id)
+        return self.store.account(account_id)
+
+    def close_manual_browser(self, account_id: int) -> None:
+        with self.lock:
+            browser = self.manual_browsers.pop(account_id, None)
+        if browser:
+            browser.close()
 
     def _login_account(self, account_id: int) -> None:
         account = self.store.account(account_id)

@@ -41,7 +41,7 @@ function renderAccounts() {
     const statusClass = ready ? "active" : "failed";
     return '<tr><td><span class="cell-title"><span class="account-id">#' + item.id + '</span>' + esc(item.name) + '</span><span class="cell-sub" title="' + esc(item.last_error || "") + '">' + esc(item.last_error || "Krea 浏览器会话") + '</span></td>' +
       '<td><span class="badge ' + statusClass + '">' + status + '</span></td><td class="mono">' + num(item.balance) + '</td><td class="mono">' + esc(item.project_id || "—") + '</td><td class="proxy mono" title="' + esc(item.proxy_url || "") + '">' + esc(item.proxy_url || "直连") + '</td><td>' + esc(item.max_concurrency || 1) + '</td><td>' + stamp(item.updated_at) + '</td>' +
-      '<td><div class="row-actions">' + (item.has_password ? '<button class="icon-button" data-action="login" data-id="' + item.id + '" title="重试登录"><i data-lucide="log-in"></i></button>' : '') + '<button class="icon-button" data-action="refresh" data-id="' + item.id + '" title="刷新余额"><i data-lucide="refresh-cw"></i></button><button class="icon-button" data-action="edit" data-id="' + item.id + '" title="设置账号"><i data-lucide="pencil"></i></button><button class="icon-button" data-action="toggle" data-id="' + item.id + '" title="' + (item.enabled ? "停用" : "启用") + '"><i data-lucide="' + (item.enabled ? "pause" : "play") + '"></i></button></div></td></tr>';
+      '<td><div class="row-actions">' + (item.has_password ? '<button class="icon-button" data-action="login" data-id="' + item.id + '" title="重试登录"><i data-lucide="log-in"></i></button><button class="icon-button' + (item.login_status === 'challenge_required' ? ' needs-verification' : '') + '" data-action="browser-assist" data-id="' + item.id + '" title="网页人工验证"><i data-lucide="mouse-pointer-2"></i></button>' : '') + '<button class="icon-button" data-action="refresh" data-id="' + item.id + '" title="刷新余额"><i data-lucide="refresh-cw"></i></button><button class="icon-button" data-action="edit" data-id="' + item.id + '" title="设置账号"><i data-lucide="pencil"></i></button><button class="icon-button" data-action="toggle" data-id="' + item.id + '" title="' + (item.enabled ? "停用" : "启用") + '"><i data-lucide="' + (item.enabled ? "pause" : "play") + '"></i></button></div></td></tr>';
   }).join("");
   icons();
 }
@@ -186,6 +186,7 @@ $("#accountsBody").addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-action]"); if (!button) return;
   const account = state.accounts.find((item) => item.id === Number(button.dataset.id)); if (!account) return;
   if (button.dataset.action === "edit") return openAccount(account);
+  if (button.dataset.action === "browser-assist") return window.openKreaBrowserAssist(account.id);
   try {
     if (button.dataset.action === "refresh") await api("/api/admin/accounts/" + account.id + "/refresh", {method:"POST"});
     if (button.dataset.action === "login") await api("/api/admin/accounts/" + account.id + "/login", {method:"POST"});
