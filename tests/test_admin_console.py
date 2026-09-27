@@ -4,6 +4,7 @@ import json
 from fastapi.testclient import TestClient
 
 from app.service import Service
+from app.client import KreaError
 from app.store import Store
 
 
@@ -71,3 +72,25 @@ def test_admin_settings_account_and_task_detail(tmp_path, monkeypatch):
         assert "password_ciphertext" not in client.get("/api/admin/accounts").text
         account_id = result["accounts"][0]["id"]
         assert "new-password" not in main.store.credential(account_id)
+
+
+def test_rejected_submission_marks_that_no_task_was_accepted(monkeypatch):
+    main = importlib.import_module("app.main")
+    client = TestClient(main.app)
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(main.service, "create", lambda _body:
+                           (_ for _ in ()).throw(KreaError("no Krea account available", 503)))
+            response = client.post("/v1/videos", headers={"Authorization": "Bearer test-api-key"},
+                                   json={"prompt": "test"})
+            assert response.status_code == 503
+            assert response.headers["X-KREAPI-Submit-Outcome"] == "not-accepted"
+        with monkeypatch.context() as scoped:
+            scoped.setattr(main.service, "create", lambda _body:
+                           (_ for _ in ()).throw(RuntimeError("unexpected")))
+            response = client.post("/v1/videos", headers={"Authorization": "Bearer test-api-key"},
+                                   json={"prompt": "test"})
+            assert response.status_code == 500
+            assert "X-KREAPI-Submit-Outcome" not in response.headers
+    finally:
+        client.close()

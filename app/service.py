@@ -306,8 +306,11 @@ class Service:
                                    last_error="")
         except Exception as exc:
             message = str(exc)[:600]
+            public_message = ("素材下载失败，请检查素材链接后重试~"
+                              if isinstance(exc, KreaError) and exc.code == "MEDIA_DOWNLOAD_FAILED"
+                              else message)
             self.store.update_task(task_id, status="failed", reserved_cost=0,
-                                   error=message)
+                                   error=public_message)
             self.store.set_account(account["id"], last_error=message,
                                    cookies=client.export_cookies())
             LOG.warning("task %s failed before upstream acceptance: %s", task_id, message)

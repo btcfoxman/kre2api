@@ -101,7 +101,10 @@ def _create(body: dict[str, Any], wait: bool = False) -> dict[str, Any]:
     try:
         task = service.create(body)
     except Exception as exc:
-        raise _raise(exc) from exc
+        error = _raise(exc)
+        if isinstance(exc, (KreaError, ValueError, TypeError, IndexError)):
+            error.headers = {**(error.headers or {}), "X-KREAPI-Submit-Outcome": "not-accepted"}
+        raise error from exc
     if wait:
         deadline = time.monotonic() + min(int(os.getenv("KR_SYNC_TIMEOUT_SECONDS", "900")), 900)
         while time.monotonic() < deadline:

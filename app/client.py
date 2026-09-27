@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,7 @@ class KreaError(Exception):
     message: str
     status_code: int = 502
     retryable: bool = False
+    code: str = ""
 
     def __str__(self) -> str:
         return self.message
@@ -138,15 +140,26 @@ class KreaClient:
             mime = match.group(1)
             filename = "reference" + (mimetypes.guess_extension(mime) or ".bin")
         elif source.startswith(("https://", "http://")):
-            try:
-                kwargs: dict[str, Any] = {"timeout": self.timeout, "impersonate": "chrome"}
-                if self.proxy_url:
-                    kwargs["proxies"] = {"https": self.proxy_url, "http": self.proxy_url}
-                response = requests.get(source, **kwargs)
-            except Exception as exc:
-                raise KreaError(f"media download failed: {type(exc).__name__}", retryable=True) from exc
-            if response.status_code >= 400:
-                raise KreaError(f"media download returned HTTP {response.status_code}")
+            routes = list(dict.fromkeys(("", self.proxy_url,
+                                        os.getenv("KR_MEDIA_FALLBACK_PROXY_URL", "").strip())))
+            last_error = ""
+            response = None
+            for proxy in routes:
+                try:
+                    response = requests.get(
+                        source, impersonate="chrome", proxy=proxy or None,
+                        timeout=max(10, int(os.getenv("KR_MEDIA_TIMEOUT_SECONDS", "180"))),
+                        allow_redirects=True,
+                        headers={"User-Agent": self.headers.get("User-Agent", "Mozilla/5.0")},
+                    )
+                    if response.status_code < 400:
+                        break
+                    last_error = f"HTTP {response.status_code}"
+                except Exception as exc:
+                    last_error = type(exc).__name__
+            if response is None or response.status_code >= 400:
+                raise KreaError(f"media download failed: {last_error}",
+                                retryable=True, code="MEDIA_DOWNLOAD_FAILED")
             if len(response.content) > MAX_MEDIA_BYTES:
                 raise ValueError("media file exceeds 100 MiB")
             data = response.content
