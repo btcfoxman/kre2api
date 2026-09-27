@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir -r requirements.txt
 COPY app ./app
+COPY docker-compose.yml ./docker-compose.yml
 RUN mkdir -p /app/data
 EXPOSE 8796
 CMD ["xvfb-run", "-a", "-s", "-screen 0 1280x960x24 -nolisten tcp", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8796", "--proxy-headers"]

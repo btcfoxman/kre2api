@@ -62,7 +62,6 @@ jobs:
     env:
       IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
     steps:
-      - uses: actions/checkout@v4
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -74,7 +73,16 @@ jobs:
           set -euo pipefail
           install -d -m 750 "$DEPLOY_PATH"
           test -f "$DEPLOY_PATH/.env"
-          install -m 644 docker-compose.yml "$DEPLOY_PATH/docker-compose.yml"
+          for attempt in 1 2 3; do
+            if docker pull "$IMAGE_REF:$IMAGE_TAG"; then break; fi
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            sleep $((attempt * 15))
+          done
+          compose_tmp=$(mktemp "$DEPLOY_PATH/docker-compose.yml.XXXXXX")
+          trap 'rm -f "$compose_tmp"' EXIT
+          docker run --rm --entrypoint cat "$IMAGE_REF:$IMAGE_TAG" /app/docker-compose.yml > "$compose_tmp"
+          chmod 644 "$compose_tmp"
+          mv -f "$compose_tmp" "$DEPLOY_PATH/docker-compose.yml"
           cd "$DEPLOY_PATH"
           docker network inspect my-shared-net >/dev/null 2>&1 || docker network create my-shared-net
           export IMAGE_REGISTRY IMAGE_NAMESPACE IMAGE_NAME IMAGE_TAG
