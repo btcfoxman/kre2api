@@ -38,11 +38,34 @@ def result_urls(job: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(urls))
 
 
-def failure_message(job: dict[str, Any]) -> str:
+def failure_message(job: dict[str, Any], *, refund_confirmed: bool = False) -> str:
     result = job.get("result") or {}
+    nested = result.get("data") if isinstance(result, dict) else None
+    nested = nested if isinstance(nested, dict) else {}
+    details: list[dict[str, Any]] = []
+    raw_message = nested.get("msg")
+    if isinstance(raw_message, str):
+        try:
+            body = json.loads(raw_message)
+            if isinstance(body, dict) and isinstance(body.get("detail"), list):
+                details = [item for item in body["detail"] if isinstance(item, dict)]
+        except ValueError:
+            pass
+    policy = nested.get("type") == "content_policy_violation" or any(
+        item.get("type") == "content_policy_violation" for item in details)
+    if policy:
+        output = any("generated_video" in (item.get("loc") or []) or
+                     str(item.get("msg") or "").lower().startswith("output ")
+                     for item in details)
+        if output:
+            return ("生成的视频内容违规，请修改描述后重试，积分已返还~" if refund_confirmed
+                    else "生成的视频内容违规，请修改描述后重试")
+        return ("检测到内容有敏感或违规情况，积分已返还，请重试~" if refund_confirmed
+                else "检测到内容有敏感或违规情况，请修改后重试")
     for value in (job.get("error"), job.get("message"),
                   result.get("error") if isinstance(result, dict) else None,
-                  result.get("message") if isinstance(result, dict) else None):
+                  result.get("message") if isinstance(result, dict) else None,
+                  nested.get("error")):
         if isinstance(value, dict):
             value = value.get("message") or value.get("description")
         if value:
@@ -284,8 +307,12 @@ class Service:
                                        balance_after=balance_after,
                                        error="Krea completed without a video URL")
         else:
+            unchanged_balance = (task.get("balance_before") is not None
+                                 and abs(float(task["balance_before"]) - balance_after) < 0.001
+                                 and not self.store.task_overlapped(task))
             self.store.update_task(task["id"], status="failed", reserved_cost=0,
-                                   balance_after=balance_after, error=failure_message(job))
+                                   balance_after=balance_after,
+                                   error=failure_message(job, refund_confirmed=unchanged_balance))
         self.store.set_account(account["id"], balance=balance_after,
                                cookies=client.export_cookies())
 
